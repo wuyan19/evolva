@@ -12,7 +12,11 @@
       {
         "title": "evolva",
         "width": 800,
-        "height": 600
+        "height": 600,
+        "center": true,
+        "resizable": true,
+        "minWidth": 400,
+        "minHeight": 400
       }
     ],
     "security": {

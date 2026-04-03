@@ -1,39 +1,582 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="stylesheet" href="styles.css" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri App</title>
-    <script type="module" src="/main.js" defer></script>
-  </head>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>evolva</title>
+  <script src="https://cdn.jsdelivr.net/npm/interactjs/dist/interact.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f0f1a;
+      background-image: radial-gradient(#2a2a4a 1px, transparent 1px);
+      background-size: 20px 20px;
+      color: #e0e0e0;
+      height: 100vh;
+      width: 100vw;
+      overflow: hidden;
+      position: relative;
+    }
 
-  <body>
-    <main class="container">
-      <h1>Welcome to Tauri</h1>
+    /* Window base styles */
+    .evolva-window {
+      position: absolute;
+      background: #16213e;
+      border: 1px solid #2a2a4a;
+      border-radius: 10px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+      display: flex;
+      flex-direction: column;
+      touch-action: none;
+      user-select: none;
+      overflow: hidden;
+    }
+    .evolva-window.active { box-shadow: 0 8px 32px rgba(0,212,255,0.15); border-color: #3a3a5a; }
 
-      <div class="row">
-        <a href="https://tauri.app" target="_blank">
-          <img src="/assets/tauri.svg" class="logo tauri" alt="Tauri logo" />
-        </a>
-        <a
-          href="https://developer.mozilla.org/en-US/docs/Web/JavaScript"
-          target="_blank"
-        >
-          <img
-            src="/assets/javascript.svg"
-            class="logo vanilla"
-            alt="JavaScript logo"
-          />
-        </a>
+    /* Window header (drag handle) */
+    .window-header {
+      cursor: move;
+      background: #1a1a30;
+      padding: 10px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #2a2a4a;
+      flex-shrink: 0;
+    }
+    .window-header h2 {
+      font-size: 13px;
+      font-weight: 700;
+      color: #00d4ff;
+      letter-spacing: 2px;
+    }
+    .window-header p {
+      font-size: 10px;
+      color: #5a5a7a;
+    }
+
+    /* Core window */
+    #evolva-core {
+      top: 30px;
+      left: 30px;
+      width: 460px;
+      max-height: calc(100vh - 60px);
+      z-index: 100;
+    }
+
+    /* Settings Panel */
+    #settings-panel {
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px 14px;
+      background: #1a1a30;
+      border-bottom: 1px solid #2a2a4a;
+      flex-shrink: 0;
+    }
+    #settings-panel label {
+      font-size: 11px;
+      color: #5a5a7a;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    #settings-panel input, #settings-panel select {
+      background: #0f0f1a;
+      border: 1px solid #2a2a4a;
+      color: #e0e0e0;
+      padding: 7px 10px;
+      border-radius: 5px;
+      font-size: 12px;
+      outline: none;
+    }
+    #settings-panel input:focus, #settings-panel select:focus {
+      border-color: #00d4ff;
+    }
+    #settings-panel select option {
+      background: #0f0f1a;
+      color: #e0e0e0;
+    }
+    #save-settings {
+      background: #00d4ff;
+      color: #0f0f1a;
+      border: none;
+      padding: 7px 14px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      transition: opacity 0.2s;
+      align-self: flex-start;
+    }
+    #save-settings:hover { opacity: 0.85; }
+
+    /* Context Bar */
+    #context-bar {
+      position: relative;
+      height: 18px;
+      background: #1a1a30;
+      border-bottom: 1px solid #2a2a4a;
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+    #context-fill {
+      height: 100%;
+      background: #00d4ff;
+      transition: width 0.4s, background 0.4s;
+      width: 0%;
+    }
+    #context-fill.warning { background: #f59e0b; }
+    #context-fill.danger { background: #ef4444; }
+    #context-text {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 9px;
+      color: #e0e0e0;
+      font-family: monospace;
+      white-space: nowrap;
+      text-shadow: 0 0 4px rgba(0,0,0,0.8);
+    }
+
+    /* Log Area */
+    #log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 14px;
+      font-family: monospace;
+      font-size: 11px;
+      line-height: 1.6;
+      user-select: text;
+      -webkit-user-select: text;
+      min-height: 120px;
+    }
+    .log-entry {
+      margin-bottom: 3px;
+      word-wrap: break-word;
+    }
+    .log-time {
+      color: #4a4a6a;
+      margin-right: 6px;
+    }
+    .log-actor {
+      font-weight: 600;
+      margin-right: 6px;
+    }
+    .log-actor.system { color: #00d4ff; }
+    .log-actor.user { color: #a78bfa; }
+    .log-actor.error { color: #ef4444; }
+
+    /* Input Area */
+    #input-area {
+      display: flex;
+      align-items: flex-end;
+      gap: 6px;
+      padding: 10px 14px;
+      background: #1a1a30;
+      border-top: 1px solid #2a2a4a;
+      flex-shrink: 0;
+    }
+    #prompt {
+      flex: 1;
+      background: #0f0f1a;
+      border: 1px solid #2a2a4a;
+      color: #e0e0e0;
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: inherit;
+      resize: none;
+      outline: none;
+      max-height: 120px;
+      min-height: 36px;
+      overflow-y: auto;
+      line-height: 1.5;
+    }
+    #prompt:focus { border-color: #00d4ff; }
+    #send {
+      background: #00d4ff;
+      color: #0f0f1a;
+      border: none;
+      width: 36px;
+      height: 36px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: opacity 0.2s;
+    }
+    #send:hover { opacity: 0.85; }
+    #send.loading { opacity: 0.6; cursor: not-allowed; }
+    #send-spinner {
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    /* Settings toggle button */
+    #settings-toggle {
+      background: #2a2a4a;
+      color: #e0e0e0;
+      border: 1px solid #3a3a5a;
+      padding: 4px 12px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 11px;
+      transition: background 0.2s;
+    }
+    #settings-toggle:hover { background: #3a3a5a; }
+  </style>
+</head>
+<body>
+
+  <!-- CORE WINDOW -->
+  <div id="evolva-core" class="evolva-window active">
+    <div class="window-header">
+      <div>
+        <h2>Evolva</h2>
+        <p>self-evolving application</p>
       </div>
-      <p>Click on the Tauri logo to learn more about the framework</p>
+      <button id="settings-toggle">settings</button>
+    </div>
 
-      <form class="row" id="greet-form">
-        <input id="greet-input" placeholder="Enter a name..." />
-        <button type="submit">Greet</button>
-      </form>
-      <p id="greet-msg"></p>
-    </main>
-  </body>
+    <div id="settings-panel">
+      <label>API Key</label>
+      <input type="password" id="api-key" placeholder="sk-...">
+      <label>Base URL</label>
+      <input type="text" id="base-url" placeholder="https://api.openai.com/v1">
+      <label>Protocol</label>
+      <select id="protocol">
+        <option value="openai">OpenAI</option>
+        <option value="anthropic">Anthropic</option>
+      </select>
+      <label>Model</label>
+      <input type="text" id="model" placeholder="gpt-4o">
+      <button id="save-settings">Save</button>
+    </div>
+
+    <div id="context-bar">
+      <div id="context-fill"></div>
+      <span id="context-text">context 0 / 128k (0%)</span>
+    </div>
+
+    <div id="log"></div>
+
+    <div id="input-area">
+      <textarea id="prompt" placeholder="Enter mutation instruction..." rows="1"></textarea>
+      <button id="send">
+        <span id="send-arrow">&rarr;</span>
+        <span id="send-spinner" style="display:none">&#x27F3;</span>
+      </button>
+    </div>
+  </div>
+
+  <script type="text/plain" id="system-prompt">You are Evolva, a self-evolving application. Your job is to modify the webpage based on user instructions.
+
+Rules:
+1. Analyze the current DOM structure carefully
+2. Generate ONLY JavaScript code that modifies the DOM
+3. Wrap your code in a ```javascript code block
+4. Do NOT modify or remove the element with id="evolva-core" or any of its children (settings-toggle, settings-panel, context-bar, context-fill, context-text, log, input-area, prompt, send, send-arrow, send-spinner, system-prompt). This is your control panel.
+5. When creating new UI elements, wrap them in a draggable window:
+   - Create a div with class="evolva-window" and absolute positioning
+   - Add a child div with class="window-header" as the drag handle
+   - Set a higher z-index than existing windows
+   - Call setupDraggable(newElement) to enable drag/resize
+6. Use standard DOM APIs (createElement, appendChild, querySelector, etc.)
+7. Use `import` from `https://esm.sh/` for external libraries
+8. Keep code concise to save token space
+9. Return only the code block, no explanations needed</script>
+
+  <script>
+    // Tauri environment check
+    if (!window.__TAURI__) {
+      document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#e0e0e0;font-family:monospace;background:#0f0f1a"><p>Evolva must run inside Tauri. Use: <code>cargo tauri dev</code></p></div>';
+      throw new Error('Not running in Tauri');
+    }
+
+    const { invoke } = window.__TAURI__.core;
+
+    // DOM refs
+    const coreWindow = document.getElementById('evolva-core');
+    const settingsToggle = document.getElementById('settings-toggle');
+    const settingsPanel = document.getElementById('settings-panel');
+    const apiKeyInput = document.getElementById('api-key');
+    const baseUrlInput = document.getElementById('base-url');
+    const protocolSelect = document.getElementById('protocol');
+    const modelInput = document.getElementById('model');
+    const saveSettingsBtn = document.getElementById('save-settings');
+    const contextFill = document.getElementById('context-fill');
+    const contextText = document.getElementById('context-text');
+    const logEl = document.getElementById('log');
+    const promptEl = document.getElementById('prompt');
+    const sendBtn = document.getElementById('send');
+    const sendArrow = document.getElementById('send-arrow');
+    const sendSpinner = document.getElementById('send-spinner');
+
+    let processing = false;
+    let topZ = 100;
+
+    // --- Drag & Resize (interact.js) ---
+    function setupDraggable(el) {
+      interact(el)
+        .draggable({
+          allowFrom: '.window-header',
+          inertia: true,
+          modifiers: [
+            interact.modifiers.restrictRect({
+              restriction: 'parent',
+              endOnly: true
+            })
+          ],
+          listeners: {
+            move(event) {
+              var target = event.target;
+              var x = (parseFloat(target.getAttribute('data-x')) || 0) + event.dx;
+              var y = (parseFloat(target.getAttribute('data-y')) || 0) + event.dy;
+              target.style.transform = 'translate(' + x + 'px, ' + y + 'px)';
+              target.setAttribute('data-x', x);
+              target.setAttribute('data-y', y);
+            }
+          }
+        })
+        .resizable({
+          edges: { left: false, right: true, bottom: true, top: false },
+          listeners: {
+            move(event) {
+              var target = event.target;
+              var x = (parseFloat(target.getAttribute('data-x')) || 0) + event.deltaRect.left;
+              var y = (parseFloat(target.getAttribute('data-y')) || 0) + event.deltaRect.top;
+              target.style.width = event.rect.width + 'px';
+              target.style.height = event.rect.height + 'px';
+              target.style.transform = 'translate(' + x + 'px, ' + y + 'px)';
+              target.setAttribute('data-x', x);
+              target.setAttribute('data-y', y);
+            }
+          }
+        });
+    }
+
+    // Bring window to front on click
+    function bringToFront(el) {
+      topZ++;
+      el.style.zIndex = topZ;
+      document.querySelectorAll('.evolva-window').forEach(function(w) {
+        w.classList.remove('active');
+      });
+      el.classList.add('active');
+    }
+
+    document.querySelectorAll('.evolva-window').forEach(function(w) {
+      w.addEventListener('mousedown', function() { bringToFront(w); });
+    });
+
+    // Setup core window
+    setupDraggable(coreWindow);
+
+    // Make setupDraggable globally available for LLM-generated code
+    window.setupDraggable = setupDraggable;
+    window.bringToFront = bringToFront;
+
+    // --- Log ---
+    function log(actor, message) {
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      const time = document.createElement('span');
+      time.className = 'log-time';
+      time.textContent = new Date().toLocaleTimeString();
+      const actorEl = document.createElement('span');
+      actorEl.className = 'log-actor ' + actor;
+      actorEl.textContent = actor;
+      const msg = document.createElement('span');
+      msg.textContent = message;
+      entry.appendChild(time);
+      entry.appendChild(actorEl);
+      entry.appendChild(msg);
+      logEl.appendChild(entry);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // --- Settings ---
+    function loadSettings() {
+      apiKeyInput.value = localStorage.getItem('evolva_key') || '';
+      baseUrlInput.value = localStorage.getItem('evolva_base') || '';
+      modelInput.value = localStorage.getItem('evolva_model') || '';
+      protocolSelect.value = localStorage.getItem('evolva_protocol') || 'openai';
+    }
+
+    function saveSettings() {
+      localStorage.setItem('evolva_key', apiKeyInput.value.trim());
+      localStorage.setItem('evolva_base', baseUrlInput.value.trim());
+      localStorage.setItem('evolva_model', modelInput.value.trim());
+      localStorage.setItem('evolva_protocol', protocolSelect.value);
+      log('system', 'Settings saved.');
+    }
+
+    settingsToggle.addEventListener('click', () => {
+      const visible = settingsPanel.style.display !== 'none';
+      settingsPanel.style.display = visible ? 'none' : 'flex';
+      settingsToggle.textContent = visible ? 'settings' : 'close';
+    });
+
+    saveSettingsBtn.addEventListener('click', saveSettings);
+
+    // --- Context Bar ---
+    function updateContext() {
+      const dom = document.documentElement.outerHTML;
+      const tokens = Math.round(dom.length / 4);
+      const maxTokens = 128000;
+      const pct = Math.min((tokens / maxTokens) * 100, 100);
+      contextFill.style.width = pct + '%';
+      contextText.textContent = 'context ' + tokens + ' / 128k (' + pct.toFixed(1) + '%)';
+      contextFill.classList.remove('warning', 'danger');
+      if (pct > 96) contextFill.classList.add('danger');
+      else if (pct > 72) contextFill.classList.add('warning');
+    }
+
+    // --- DOM Capture ---
+    function captureDom() {
+      let html = document.documentElement.outerHTML;
+
+      // 1. Strip system prompt first
+      html = html.replace(
+        /<script type="text\/plain" id="system-prompt">[\s\S]*?<\/script>/,
+        '<!-- system prompt omitted -->'
+      );
+
+      // 2. Strip all remaining <script> tags
+      html = html.replace(/<script[\s\S]*?<\/script>/gi, '');
+
+      // 3. Truncate log entries to last 10
+      const logEntries = logEl.children;
+      if (logEntries.length > 10) {
+        const excess = logEntries.length - 10;
+        for (let i = 0; i < excess; i++) {
+          logEl.removeChild(logEl[0]);
+        }
+      }
+
+      return html;
+    }
+
+    // --- Code Extraction ---
+    function extractCode(response) {
+      const patterns = [
+        /```(?:javascript|js)\s*\n([\s\S]*?)```/,
+        /~~~(?:javascript|js)\s*\n([\s\S]*?)~~~/,
+      ];
+      for (const pattern of patterns) {
+        const match = response.match(pattern);
+        if (match) return match[1].trim();
+      }
+      return null;
+    }
+
+    // --- Script Injection ---
+    function injectCode(code) {
+      code = code.replace(
+        /(?:const|let|var)\s+(\w+)\s*=\s*require\(['"]([\w@/.\\-]+)['"]\)/g,
+        'const $1 = (await import("https://esm.sh/$2"))'
+      );
+      code = code.replace(
+        /require\(['"]([\w@/.\\-]+)['"]\)/g,
+        '(await import("https://esm.sh/$1"))'
+      );
+
+      const script = document.createElement('script');
+      script.textContent = '(async () => {\n' + code + '\n})();';
+      document.body.appendChild(script);
+      script.remove();
+    }
+
+    // --- Mutation Loop ---
+    async function mutate() {
+      if (processing) return;
+
+      const apiKey = (localStorage.getItem('evolva_key') || '').trim();
+      const baseUrl = (localStorage.getItem('evolva_base') || '').trim();
+      const model = (localStorage.getItem('evolva_model') || '').trim();
+      const protocol = (localStorage.getItem('evolva_protocol') || 'openai').trim();
+
+      if (!apiKey && !baseUrl) {
+        log('error', 'Configure settings first');
+        return;
+      }
+
+      const userMsg = promptEl.value.trim();
+      if (!userMsg) return;
+
+      processing = true;
+      sendBtn.classList.add('loading');
+      sendArrow.style.display = 'none';
+      sendSpinner.style.display = 'inline';
+      promptEl.disabled = true;
+
+      try {
+        log('user', userMsg);
+
+        const systemPrompt = document.getElementById('system-prompt').textContent;
+        const dom = captureDom();
+
+        const result = await invoke('call_llm', {
+          req: {
+            protocol,
+            api_key: apiKey,
+            base_url: baseUrl,
+            model,
+            system: systemPrompt,
+            user: 'Current DOM:\n```\n' + dom + '\n```\n\nUser instruction: ' + userMsg,
+          },
+        });
+
+        const code = extractCode(result);
+        if (!code) {
+          log('error', 'No JavaScript code block found');
+          console.log('LLM response:', result);
+          return;
+        }
+
+        injectCode(code);
+        log('system', 'Mutation applied.');
+        promptEl.value = '';
+        promptEl.style.height = 'auto';
+        updateContext();
+      } catch (err) {
+        log('error', String(err));
+      } finally {
+        processing = false;
+        sendBtn.classList.remove('loading');
+        sendArrow.style.display = 'inline';
+        sendSpinner.style.display = 'none';
+        promptEl.disabled = false;
+      }
+    }
+
+    // --- Event Handlers ---
+    sendBtn.addEventListener('click', mutate);
+
+    promptEl.addEventListener('keydown', (e) => {
+      if (e.ctrlKey && e.key === 'Enter') {
+        e.preventDefault();
+        mutate();
+      }
+    });
+
+    promptEl.addEventListener('input', () => {
+      promptEl.style.height = 'auto';
+      promptEl.style.height = Math.min(promptEl.scrollHeight, 140) + 'px';
+    });
+
+    // --- Init ---
+    loadSettings();
+    updateContext();
+    log('system', 'Evolva initialized. Configure settings to begin.');
+  </script>
+</body>
 </html>
