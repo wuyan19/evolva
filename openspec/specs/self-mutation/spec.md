@@ -1,4 +1,4 @@
-## ADDED Requirements
+## Requirements
 
 ### Requirement: DOM capture with compression
 The system SHALL capture the current page DOM (`document.documentElement.outerHTML`) and apply three compression steps before sending to the LLM: (1) strip all `<script>` tags before `</body>`, (2) strip `<script type="text/plain">` system prompt tags, (3) truncate log entries to the last 10.
@@ -46,11 +46,11 @@ The system SHALL execute extracted code by injecting it as a `<script>` element 
 - **THEN** the error SHALL be caught and logged to console.error as "Mutation Error", without crashing the application
 
 ### Requirement: Mutation loop orchestration
-The system SHALL orchestrate the full mutation loop: lock UI during processing, call LLM, extract and execute code, unlock UI. The prompt textarea SHALL be cleared on successful mutation. Context usage SHALL be updated after each cycle.
+The system SHALL orchestrate the full mutation loop: lock UI during processing, call LLM, extract and execute code, save mutation to backend, unlock UI. The prompt textarea SHALL be cleared on successful mutation. Context usage SHALL be updated after each cycle. After successful code injection, the system SHALL call `save_mutation` with the user instruction and extracted code.
 
 #### Scenario: Full successful cycle
 - **WHEN** user submits a valid prompt with configured settings
-- **THEN** the system SHALL lock UI, log user message, call LLM, execute mutation, log success, clear prompt, unlock UI, and update context bar
+- **THEN** the system SHALL lock UI, log user message, call LLM, execute mutation, save mutation to backend, log success, clear prompt, unlock UI, and update context bar
 
 #### Scenario: Processing lock
 - **WHEN** a request is in progress and user clicks send again

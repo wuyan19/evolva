@@ -110,28 +110,46 @@
       top: 30px;
       left: 30px;
       width: 460px;
-      max-height: calc(200vh - 60px);
+      height: 620px;
+      max-height: calc(100vh - 60px);
       z-index: 100;
     }
 
-    /* Settings Panel */
-    #settings-panel {
-      display: none;
-      flex-direction: column;
-      gap: 8px;
-      padding: 12px 14px;
-      background: var(--bg-header);
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-      transition: background 0.3s;
+    /* Settings Dialog */
+    .settings-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 99999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
-    #settings-panel label {
+    .settings-dialog {
+      background: var(--bg-window);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px 24px;
+      width: 360px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      font-family: inherit;
+      color: var(--text-primary);
+    }
+    .settings-dialog h3 {
+      margin: 0 0 6px;
+      font-size: 14px;
+      color: var(--accent);
+      letter-spacing: 1px;
+    }
+    .settings-dialog label {
       font-size: 11px;
       color: var(--text-muted);
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
-    #settings-panel input, #settings-panel select {
+    .settings-dialog input, .settings-dialog select {
       background: var(--bg-input);
       border: 1px solid var(--border);
       color: var(--text-primary);
@@ -139,39 +157,20 @@
       border-radius: 5px;
       font-size: 12px;
       outline: none;
-      transition: border-color 0.2s, background 0.3s;
+      transition: border-color 0.2s;
     }
-    #settings-panel input:focus, #settings-panel select:focus {
+    .settings-dialog input:focus, .settings-dialog select:focus {
       border-color: var(--accent);
     }
-    #settings-panel select option {
+    .settings-dialog select option {
       background: var(--bg-input);
       color: var(--text-primary);
     }
-    #save-settings {
-      background: var(--accent);
-      color: var(--accent-on);
-      border: none;
-      padding: 7px 14px;
-      border-radius: 5px;
-      cursor: pointer;
-      font-size: 12px;
-      font-weight: 600;
-      transition: opacity 0.2s;
-      align-self: flex-start;
+    .settings-dialog .theme-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
     }
-    #save-settings:hover { opacity: 0.85; }
-    #close-settings {
-      background: var(--btn-bg);
-      color: var(--text-primary);
-      border: 1px solid var(--btn-border);
-      padding: 7px 14px;
-      border-radius: 5px;
-      cursor: pointer;
-      font-size: 12px;
-      transition: background 0.2s;
-    }
-    #close-settings:hover { background: var(--btn-border); }
 
     /* Theme toggle row */
     .theme-row {
@@ -235,7 +234,6 @@
       width: auto !important;
       height: auto !important;
     }
-    #evolva-core.collapsed > #settings-panel,
     #evolva-core.collapsed > #menu-bar,
     #evolva-core.collapsed > #log,
     #evolva-core.collapsed > #input-area,
@@ -386,28 +384,7 @@
       <button class="menu-btn" id="menu-settings">Settings</button>
       <button class="menu-btn" id="menu-import">Import</button>
       <button class="menu-btn" id="menu-export">Export</button>
-    </div>
-
-    <div id="settings-panel">
-      <label>API Key</label>
-      <input type="password" id="api-key" placeholder="sk-...">
-      <label>Base URL</label>
-      <input type="text" id="base-url" placeholder="https://api.openai.com/v1">
-      <label>Protocol</label>
-      <select id="protocol">
-        <option value="openai">OpenAI</option>
-        <option value="anthropic">Anthropic</option>
-      </select>
-      <label>Model</label>
-      <input type="text" id="model" placeholder="gpt-4o">
-      <div class="theme-row">
-        <label>Theme</label>
-        <div id="theme-toggle" class="theme-toggle"></div>
-      </div>
-      <div style="display:flex;gap:8px">
-        <button id="save-settings">Save</button>
-        <button id="close-settings">Close</button>
-      </div>
+      <button class="menu-btn" id="menu-about">About</button>
     </div>
 
     <div id="log"></div>
@@ -429,19 +406,19 @@
   <script type="text/plain" id="system-prompt">You are Evolva, a self-evolving application. Your job is to modify the webpage based on user instructions.
 
 Rules:
-1. Analyze the current DOM structure carefully
-2. Generate ONLY JavaScript code that modifies the DOM
-3. Wrap your code in a ```javascript code block
-4. Do NOT modify or remove any element with the attribute `data-protected`, nor any of its children. This is your control panel.
-5. When creating new UI elements, wrap them in a draggable window:
+1. Generate ONLY a ```javascript code block — no explanations before or after
+2. Do NOT modify or remove any element with `data-protected` attribute, nor any of its children. This is the control panel (#evolva-core) containing the menu bar, settings, log, input area, and context bar
+3. When creating new UI elements, wrap them in a draggable window:
    - Create a div with class="evolva-window" and absolute positioning
    - Add a child div with class="window-header" as the drag handle
    - Set a higher z-index than existing windows
    - Call setupDraggable(newElement) to enable drag/resize
-6. Use standard DOM APIs (createElement, appendChild, querySelector, etc.)
-7. Use `import` from `https://esm.sh/` for external libraries
-8. Keep code concise to save token space
-9. Return only the code block, no explanations needed</script>
+   - Call bringToFront(newElement) when the window needs focus, or add a mousedown listener: el.addEventListener('mousedown', () => bringToFront(el))
+4. For keyboard input (games, shortcuts), use onActiveKeydown(windowEl, handler) and onActiveKeyup(windowEl, handler). These only fire when the window is the active (focused) one. Do NOT use document.addEventListener('keydown') directly
+5. Use standard DOM APIs (createElement, appendChild, querySelector, etc.)
+6. Use `import` from `https://esm.sh/` for external libraries
+7. Use CSS variables (e.g. var(--accent), var(--bg-window)) to match the app's theme
+8. Keep code concise to save token space</script>
 
   <script>
     // Tauri environment check
@@ -455,16 +432,9 @@ Rules:
     // DOM refs
     const coreWindow = document.getElementById('evolva-core');
     const collapseToggle = document.getElementById('collapse-toggle');
-    const settingsPanel = document.getElementById('settings-panel');
-    const apiKeyInput = document.getElementById('api-key');
-    const baseUrlInput = document.getElementById('base-url');
-    const protocolSelect = document.getElementById('protocol');
-    const modelInput = document.getElementById('model');
-    const saveSettingsBtn = document.getElementById('save-settings');
     const menuSettings = document.getElementById('menu-settings');
     const menuImport = document.getElementById('menu-import');
     const menuExport = document.getElementById('menu-export');
-    const importFile = document.getElementById('import-file');
     const contextFill = document.getElementById('context-fill');
     const contextText = document.getElementById('context-text');
     const logEl = document.getElementById('log');
@@ -472,7 +442,6 @@ Rules:
     const sendBtn = document.getElementById('send');
     const sendArrow = document.getElementById('send-arrow');
     const sendSpinner = document.getElementById('send-spinner');
-    const themeToggle = document.getElementById('theme-toggle');
 
     let processing = false;
     let topZ = 100;
@@ -480,7 +449,6 @@ Rules:
     // --- Theme ---
     function applyTheme(light) {
       document.body.classList.toggle('light', light);
-      themeToggle.classList.toggle('light', light);
       localStorage.setItem('evolva_theme', light ? 'light' : 'dark');
     }
 
@@ -488,10 +456,6 @@ Rules:
       const saved = localStorage.getItem('evolva_theme');
       applyTheme(saved === 'light');
     }
-
-    themeToggle.addEventListener('click', () => {
-      applyTheme(!document.body.classList.contains('light'));
-    });
 
     // --- Drag & Resize (interact.js) ---
     function setupDraggable(el) {
@@ -554,6 +518,47 @@ Rules:
     window.setupDraggable = setupDraggable;
     window.bringToFront = bringToFront;
 
+    // --- Keyboard Focus Router ---
+    // Maps window element -> { keydown: [callbacks], keyup: [callbacks] }
+    const windowKeyHandlers = new Map();
+
+    // Register keyboard handlers scoped to a window (only fires when that window is active)
+    window.onActiveKeydown = function(windowEl, handler) {
+      if (!windowKeyHandlers.has(windowEl)) {
+        windowKeyHandlers.set(windowEl, { keydown: [], keyup: [] });
+      }
+      windowKeyHandlers.get(windowEl).keydown.push(handler);
+    };
+
+    window.onActiveKeyup = function(windowEl, handler) {
+      if (!windowKeyHandlers.has(windowEl)) {
+        windowKeyHandlers.set(windowEl, { keydown: [], keyup: [] });
+      }
+      windowKeyHandlers.get(windowEl).keyup.push(handler);
+    };
+
+    // Route global keyboard events to the active window's handlers only
+    document.addEventListener('keydown', function(e) {
+      // Don't intercept when typing in inputs/textareas
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+      const activeWin = document.querySelector('.evolva-window.active');
+      if (!activeWin) return;
+      const handlers = windowKeyHandlers.get(activeWin);
+      if (handlers) {
+        handlers.keydown.forEach(function(fn) { fn(e); });
+      }
+    });
+
+    document.addEventListener('keyup', function(e) {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+      const activeWin = document.querySelector('.evolva-window.active');
+      if (!activeWin) return;
+      const handlers = windowKeyHandlers.get(activeWin);
+      if (handlers) {
+        handlers.keyup.forEach(function(fn) { fn(e); });
+      }
+    });
+
     // --- Log ---
     function log(actor, message) {
       const entry = document.createElement('div');
@@ -575,21 +580,63 @@ Rules:
 
     // --- Settings ---
     function loadSettings() {
-      apiKeyInput.value = localStorage.getItem('evolva_key') || '';
-      baseUrlInput.value = localStorage.getItem('evolva_base') || '';
-      modelInput.value = localStorage.getItem('evolva_model') || '';
-      protocolSelect.value = localStorage.getItem('evolva_protocol') || 'openai';
+      // Settings are loaded from localStorage when dialog opens
     }
 
     function saveSettings() {
-      localStorage.setItem('evolva_key', apiKeyInput.value.trim());
-      localStorage.setItem('evolva_base', baseUrlInput.value.trim());
-      localStorage.setItem('evolva_model', modelInput.value.trim());
-      localStorage.setItem('evolva_protocol', protocolSelect.value);
+      const dialog = document.querySelector('.settings-dialog');
+      if (!dialog) return;
+      localStorage.setItem('evolva_key', dialog.querySelector('#dlg-api-key').value.trim());
+      localStorage.setItem('evolva_base', dialog.querySelector('#dlg-base-url').value.trim());
+      localStorage.setItem('evolva_model', dialog.querySelector('#dlg-model').value.trim());
+      localStorage.setItem('evolva_protocol', dialog.querySelector('#dlg-protocol').value);
       log('system', 'Settings saved.');
+      dialog.closest('.settings-overlay').remove();
     }
 
-    saveSettingsBtn.addEventListener('click', saveSettings);
+    function showSettingsDialog() {
+      const overlay = document.createElement('div');
+      overlay.className = 'settings-overlay';
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+      const dlg = document.createElement('div');
+      dlg.className = 'settings-dialog';
+      const isLight = document.body.classList.contains('light');
+      dlg.innerHTML =
+        '<h3>Settings</h3>' +
+        '<label>API Key</label>' +
+        '<input type="password" id="dlg-api-key" placeholder="sk-..." value="">' +
+        '<label>Base URL</label>' +
+        '<input type="text" id="dlg-base-url" placeholder="https://api.openai.com/v1" value="">' +
+        '<label>Protocol</label>' +
+        '<select id="dlg-protocol"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select>' +
+        '<label>Model</label>' +
+        '<input type="text" id="dlg-model" placeholder="gpt-4o" value="">' +
+        '<div class="theme-row"><label>Theme</label><div id="dlg-theme" class="theme-toggle' + (isLight ? ' light' : '') + '"></div></div>' +
+        '<div style="display:flex;gap:8px;margin-top:4px">' +
+        '<button id="dlg-save" style="background:var(--accent);color:var(--accent-on);border:none;padding:7px 14px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">Save</button>' +
+        '<button id="dlg-cancel" style="background:var(--btn-bg);color:var(--text-primary);border:1px solid var(--btn-border);padding:7px 14px;border-radius:5px;cursor:pointer;font-size:12px;">Cancel</button>' +
+        '</div>';
+
+      overlay.appendChild(dlg);
+      document.body.appendChild(overlay);
+
+      // Load current values
+      dlg.querySelector('#dlg-api-key').value = localStorage.getItem('evolva_key') || '';
+      dlg.querySelector('#dlg-base-url').value = localStorage.getItem('evolva_base') || '';
+      dlg.querySelector('#dlg-model').value = localStorage.getItem('evolva_model') || '';
+      dlg.querySelector('#dlg-protocol').value = localStorage.getItem('evolva_protocol') || 'openai';
+
+      // Theme toggle inside dialog
+      dlg.querySelector('#dlg-theme').addEventListener('click', function() {
+        const nowLight = !document.body.classList.contains('light');
+        applyTheme(nowLight);
+        this.classList.toggle('light', nowLight);
+      });
+
+      dlg.querySelector('#dlg-save').addEventListener('click', saveSettings);
+      dlg.querySelector('#dlg-cancel').addEventListener('click', () => overlay.remove());
+    }
 
     // --- Collapse Toggle ---
     collapseToggle.addEventListener('click', () => {
@@ -599,113 +646,134 @@ Rules:
 
     // --- Menu Bar ---
     menuSettings.addEventListener('click', () => {
-      if (coreWindow.classList.contains('collapsed')) return;
-      const visible = settingsPanel.style.display !== 'none';
-      settingsPanel.style.display = visible ? 'none' : 'flex';
+      showSettingsDialog();
     });
 
-    document.getElementById('close-settings').addEventListener('click', () => {
-      settingsPanel.style.display = 'none';
+    // --- About ---
+    document.getElementById('menu-about').addEventListener('click', () => {
+      showAboutDialog();
     });
+
+    async function showAboutDialog() {
+      const version = await invoke('get_version');
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center;';
+
+      const dialog = document.createElement('div');
+      dialog.style.cssText = 'background:var(--bg-window);border:1px solid var(--border);border-radius:10px;padding:24px 28px;max-width:320px;text-align:center;font-family:inherit;color:var(--text-primary);';
+      dialog.innerHTML =
+        '<h3 style="margin:0 0 4px;font-size:16px;color:var(--accent);letter-spacing:1px;">Evolva</h3>' +
+        '<p style="margin:0 0 4px;font-size:11px;color:var(--text-muted);">self-evolving application</p>' +
+        '<p style="margin:0 0 16px;font-size:11px;color:var(--text-muted);">v' + version + '</p>' +
+        '<button id="about-close" style="background:var(--accent);color:var(--accent-on);border:none;padding:7px 18px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">OK</button>';
+
+      overlay.appendChild(dialog);
+      document.body.appendChild(overlay);
+
+      dialog.querySelector('#about-close').addEventListener('click', () => overlay.remove());
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    }
 
     // --- Export / Import ---
     const { save, open } = window.__TAURI__.dialog;
-    const { writeTextFile, readTextFile } = window.__TAURI__.fs;
 
-    async function exportState() {
+    async function exportApp() {
       try {
-        const bodyElements = [];
-        document.body.childNodes.forEach(child => {
-          if (child.nodeType === 1 && child.id !== 'evolva-core' && child.id !== 'import-file') {
-            bodyElements.push(child.outerHTML);
-          }
-        });
-
-        const headStyles = [];
-        const styles = document.head.querySelectorAll('style');
-        styles.forEach((style, i) => {
-          if (i > 0) headStyles.push(style.outerHTML);
-        });
-
-        const data = {
-          bodyElements,
-          headStyles,
-          timestamp: new Date().toISOString()
-        };
+        const count = await invoke('get_mutation_count');
+        if (count === 0) {
+          log('error', 'No mutations to export');
+          return;
+        }
 
         const filePath = await save({
-          defaultPath: 'evolva-state.json',
-          filters: [{ name: 'JSON', extensions: ['json'] }]
+          defaultPath: 'app.evolva.json',
+          filters: [{ name: 'Evolva JSON', extensions: ['json'] }]
         });
 
         if (!filePath) return;
 
-        await writeTextFile(filePath, JSON.stringify(data, null, 2));
-        log('system', 'State exported (' + bodyElements.length + ' elements).');
+        const name = filePath.split(/[\\/]/).pop().replace('.evolva.json', '').replace('.json', '');
+        await invoke('export_app', { path: filePath, name });
+        log('system', 'App exported (' + count + ' versions).');
       } catch (err) {
-        log('error', 'Export failed: ' + err.message);
+        log('error', 'Export failed: ' + String(err));
       }
     }
 
-    async function importState() {
+    async function importApp() {
       try {
+        const count = await invoke('get_mutation_count');
+        if (count > 0) {
+          const confirmed = await showConfirmDialog(count);
+          if (!confirmed) return;
+        }
+
         const selected = await open({
-          filters: [{ name: 'JSON', extensions: ['json'] }],
+          filters: [{ name: 'Evolva JSON', extensions: ['json'] }],
           multiple: false
         });
 
         if (!selected) return;
-        const filePath = selected;
 
-        const content = await readTextFile(filePath);
-        const data = JSON.parse(content);
+        const codes = await invoke('import_app', { path: selected });
 
-        // Remove existing non-core body elements
+        // Clear non-core DOM elements
         const toRemove = [];
         document.body.childNodes.forEach(child => {
-          if (child.nodeType === 1 && child.id !== 'evolva-core' && child.id !== 'import-file') {
+          if (child.nodeType === 1 && child.id !== 'evolva-core') {
             toRemove.push(child);
           }
         });
         toRemove.forEach(el => el.remove());
 
-        // Remove extra head styles
+        // Remove extra head styles (keep first)
         const headStyles = document.head.querySelectorAll('style');
         headStyles.forEach((style, i) => {
           if (i > 0) style.remove();
         });
 
-        // Restore body elements
-        if (data.bodyElements) {
-          data.bodyElements.forEach(html => {
-            document.body.insertAdjacentHTML('beforeend', html);
-          });
+        // Replay all versions in order
+        for (const code of codes) {
+          injectCode(code);
         }
-
-        // Restore head styles
-        if (data.headStyles) {
-          data.headStyles.forEach(html => {
-            document.head.insertAdjacentHTML('beforeend', html);
-          });
-        }
-
-        // Re-setup draggable on new windows
-        document.querySelectorAll('.evolva-window').forEach(w => {
-          if (w.id !== 'evolva-core') {
-            setupDraggable(w);
-            w.addEventListener('mousedown', () => bringToFront(w));
-          }
-        });
-
         updateContext();
-        log('system', 'State imported (' + (data.bodyElements ? data.bodyElements.length : 0) + ' elements).');
+        log('system', 'App imported (' + codes.length + ' versions replayed).');
       } catch (err) {
-        log('error', 'Import failed: ' + err.message);
+        log('error', 'Import failed: ' + String(err));
       }
     }
 
-    menuExport.addEventListener('click', exportState);
-    menuImport.addEventListener('click', importState);
+    // --- Confirm Dialog ---
+    function showConfirmDialog(count) {
+      return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.id = 'confirm-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center;';
+
+        const dialog = document.createElement('div');
+        dialog.style.cssText = 'background:var(--bg-window);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:360px;text-align:center;font-family:inherit;color:var(--text-primary);';
+        dialog.innerHTML = '<p style="margin-bottom:16px;font-size:13px;line-height:1.5;">当前会话有 <strong>' + count + '</strong> 个版本未导出，导入将覆盖当前状态。是否继续？</p>' +
+          '<div style="display:flex;gap:10px;justify-content:center;">' +
+          '<button id="confirm-cancel" style="background:var(--btn-bg);color:var(--text-primary);border:1px solid var(--btn-border);padding:7px 18px;border-radius:5px;cursor:pointer;font-size:12px;">取消</button>' +
+          '<button id="confirm-ok" style="background:var(--accent);color:var(--accent-on);border:none;padding:7px 18px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">确认</button>' +
+          '</div>';
+
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+
+        dialog.querySelector('#confirm-ok').addEventListener('click', () => {
+          overlay.remove();
+          resolve(true);
+        });
+        dialog.querySelector('#confirm-cancel').addEventListener('click', () => {
+          overlay.remove();
+          resolve(false);
+        });
+      });
+    }
+
+    menuExport.addEventListener('click', exportApp);
+    menuImport.addEventListener('click', importApp);
 
     // --- Context Bar ---
     function updateContext() {
@@ -819,6 +887,7 @@ Rules:
         }
 
         injectCode(code);
+        await invoke('save_mutation', { instruction: userMsg, code });
         log('system', 'Mutation applied.');
         promptEl.value = '';
         promptEl.style.height = 'auto';
