@@ -9,40 +9,13 @@
 </head>
 <body>
 
-  <!-- Mutation space — LLM-generated content lives here (isolated DOM) -->
-  <iframe id="mutation-space"></iframe>
-
-  <!-- CORE WINDOW — control panel on top of iframe -->
-  <div id="evolva-core" class="evolva-window active" data-protected>
-    <div class="window-header">
-      <div>
-        <h2>Evolva</h2>
-        <p></p>
-      </div>
-      <button id="collapse-toggle">&#9660;</button>
-    </div>
-
-    <div id="menu-bar">
-      <button class="menu-btn" id="menu-settings"></button>
-      <button class="menu-btn" id="menu-import"></button>
-      <button class="menu-btn" id="menu-export"></button>
-      <button class="menu-btn" id="menu-about"></button>
-    </div>
-
-    <div id="log"></div>
-
-    <div id="input-area">
-      <textarea id="prompt-input" rows="1"></textarea>
-      <button id="send-btn">
-        <span id="send-arrow">&uarr;</span>
-        <span id="send-spinner" style="display:none">&#x27F3;</span>
-      </button>
-    </div>
-
-    <div id="context-bar">
-      <div id="context-fill"></div>
-      <span id="context-text">context 0 / 128k (0%)</span>
-    </div>
+  <!-- Tab Bar — shared across all tabs -->
+  <div id="tab-bar">
+    <div id="tab-list"></div>
+    <button id="tab-new">+</button>
+    <div class="tab-bar-separator"></div>
+    <button id="tab-settings" class="tab-bar-btn"></button>
+    <button id="tab-about" class="tab-bar-btn"></button>
   </div>
 
   <script src="app.js"></script>

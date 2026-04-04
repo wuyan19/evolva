@@ -36,7 +36,14 @@ var LANG = {
     confirmImport: 'Current session has <strong>{count}</strong> unsaved versions. Import will overwrite. Continue?',
     confirmAutoLoad: 'Previous session found (<strong>{count}</strong> versions). Restore?',
     logAutoLoaded: 'Session restored ({count} versions).',
-    logAutoLoadSkipped: 'Session restore skipped.'
+    logAutoLoadSkipped: 'Session restore skipped.',
+    tabNew: 'New Tab',
+    tabDefault: 'Tab {n}',
+    confirmCloseTab: 'This tab has <strong>{count}</strong> mutations. Close anyway?',
+    logTabCreated: 'New tab created.',
+    logTabClosed: 'Tab closed.',
+    confirmRestoreAll: 'Found <strong>{count}</strong> tabs from previous session. Restore all?',
+    maxTabsReached: 'Maximum {max} tabs reached.'
   },
   zh: {
     tagline: '自演化应用',
@@ -72,7 +79,14 @@ var LANG = {
     confirmImport: '当前会话有 <strong>{count}</strong> 个版本未导出，导入将覆盖当前状态。是否继续？',
     confirmAutoLoad: '检测到上次的会话（<strong>{count}</strong> 个版本），是否恢复？',
     logAutoLoaded: '已恢复会话（{count} 个版本）。',
-    logAutoLoadSkipped: '已跳过会话恢复。'
+    logAutoLoadSkipped: '已跳过会话恢复。',
+    tabNew: '新建标签页',
+    tabDefault: '标签 {n}',
+    confirmCloseTab: '该标签页有 <strong>{count}</strong> 个变异记录。确定关闭？',
+    logTabCreated: '已创建新标签页。',
+    logTabClosed: '已关闭标签页。',
+    confirmRestoreAll: '检测到上次会话的 <strong>{count}</strong> 个标签页。是否全部恢复？',
+    maxTabsReached: '已达到最大标签页数量 {max}。'
   }
 };
 
@@ -80,19 +94,10 @@ function t(key, params) {
   var str = (LANG[currentLang] && LANG[currentLang][key]) || LANG.en[key] || key;
   if (params) {
     for (var k in params) {
-      str = str.replace(new RegExp('\\{' + k + '\\}', 'g'), params[k]);
+      str = str.replace(new RegExp('\{' + k + '\}', 'g'), params[k]);
     }
   }
   return str;
-}
-
-function applyLanguage() {
-  document.getElementById('menu-settings').textContent = t('settings');
-  document.getElementById('menu-import').textContent = t('importBtn');
-  document.getElementById('menu-export').textContent = t('exportBtn');
-  document.getElementById('menu-about').textContent = t('about');
-  document.querySelector('.window-header p').textContent = t('tagline');
-  document.getElementById('prompt-input').placeholder = t('placeholder');
 }
 
 // === Tauri check ===
@@ -103,50 +108,296 @@ if (!window.__TAURI__) {
 
 var invoke = window.__TAURI__.core.invoke;
 
-// === DOM refs ===
-var mutationFrame = document.getElementById('mutation-space');
-var coreWindow = document.getElementById('evolva-core');
-var collapseToggle = document.getElementById('collapse-toggle');
-var contextFill = document.getElementById('context-fill');
-var contextText = document.getElementById('context-text');
-var logEl = document.getElementById('log');
-var promptEl = document.getElementById('prompt-input');
-var sendBtn = document.getElementById('send-btn');
-var sendArrow = document.getElementById('send-arrow');
-var sendSpinner = document.getElementById('send-spinner');
+// === Tab State ===
+var MAX_TABS = 10;
+var tabCounter = 0;
+var tabs = {};
+var activeTabId = null;
+var cachedCssText = null;
 
-var processing = false;
-var mutationSpaceReady = false;
+function TabState(id, name) {
+  this.id = id;
+  this.name = name;
+  this.iframe = null;
+  this.coreEl = null;
+  this.processing = false;
+  this.mutationSpaceReady = false;
+  this.logEl = null;
+  this.promptEl = null;
+  this.sendBtn = null;
+  this.sendArrow = null;
+  this.sendSpinner = null;
+  this.contextFill = null;
+  this.contextText = null;
+  this.collapseToggle = null;
+}
 
-// === Mutation Space (iframe initialization) ===
-async function initMutationSpace() {
-  // Fetch CSS from external file
-  var cssText = await fetch('style.css').then(function(r) { return r.text(); });
-  var doc = mutationFrame.contentDocument;
+function getActiveState() {
+  return tabs[activeTabId] || null;
+}
 
+// === Tab Management ===
+
+async function createTab(name) {
+  var ids = Object.keys(tabs);
+  if (ids.length >= MAX_TABS) {
+    var st = getActiveState();
+    if (st) log(st, 'error', t('maxTabsReached', { max: MAX_TABS }));
+    return null;
+  }
+
+  var id = 'tab-' + (tabCounter++);
+  var state = new TabState(id, name || t('tabDefault', { n: tabCounter }));
+
+  // 创建 iframe
+  var iframe = document.createElement('iframe');
+  iframe.className = 'mutation-space';
+  iframe.style.display = 'none';
+  document.body.appendChild(iframe);
+  state.iframe = iframe;
+
+  // 创建控制面板
+  createCoreElement(state);
+
+  tabs[id] = state;
+
+  // 初始化 iframe 内容
+  await initMutationSpaceForTab(state);
+
+  // 同步主题
+  if (document.body.classList.contains('light')) {
+    var doc = state.iframe.contentDocument;
+    if (doc) {
+      doc.documentElement.classList.add('light');
+      doc.body.classList.add('light');
+    }
+  }
+
+  // 首个标签页自动激活
+  if (!activeTabId) {
+    state.iframe.style.display = '';
+    state.coreEl.style.display = '';
+    activeTabId = id;
+  }
+
+  updateTabBarUI();
+  return state;
+}
+
+function switchTab(tabId) {
+  if (tabId === activeTabId) return;
+  var state = tabs[tabId];
+  if (!state) return;
+
+  // 隐藏当前活动标签页
+  if (activeTabId && tabs[activeTabId]) {
+    tabs[activeTabId].iframe.style.display = 'none';
+    tabs[activeTabId].coreEl.style.display = 'none';
+  }
+
+  // 显示目标标签页
+  state.iframe.style.display = '';
+  state.coreEl.style.display = '';
+  activeTabId = tabId;
+
+  updateTabBarUI();
+}
+
+async function closeTab(tabId) {
+  var state = tabs[tabId];
+  if (!state) return;
+
+  // 不允许关闭正在处理的标签页
+  if (state.processing) return;
+
+  // 至少保留一个标签页
+  var ids = Object.keys(tabs);
+  if (ids.length <= 1) return;
+
+  // 从 DOM 移除
+  state.iframe.remove();
+  state.coreEl.remove();
+
+  // 后端清理
+  try {
+    await invoke('clear_mutations', { tabId: tabId });
+    await invoke('delete_tab_save', { tabId: tabId });
+  } catch (_) {}
+
+  delete tabs[tabId];
+
+  // 如果关闭的是当前活动标签页，切换到其他标签页
+  if (tabId === activeTabId) {
+    var remaining = Object.keys(tabs);
+    switchTab(remaining[remaining.length - 1]);
+  }
+
+  updateTabBarUI();
+}
+
+function updateTabBarUI() {
+  var list = document.getElementById('tab-list');
+  list.innerHTML = '';
+
+  for (var id in tabs) {
+    var state = tabs[id];
+    var item = document.createElement('div');
+    item.className = 'tab-item' + (id === activeTabId ? ' active' : '');
+    item.setAttribute('data-tab-id', id);
+
+    var nameSpan = document.createElement('span');
+    nameSpan.className = 'tab-name';
+    nameSpan.textContent = state.name;
+    item.appendChild(nameSpan);
+
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'tab-close';
+    closeBtn.innerHTML = '&times;';
+    closeBtn.addEventListener('click', (function(tid) {
+      return function(e) { e.stopPropagation(); closeTab(tid); };
+    })(id));
+    item.appendChild(closeBtn);
+
+    // 点击切换
+    item.addEventListener('click', (function(tid) {
+      return function() { switchTab(tid); };
+    })(id));
+
+    // 双击重命名
+    nameSpan.addEventListener('dblclick', (function(tid, ns) {
+      return function(e) {
+        e.stopPropagation();
+        var input = document.createElement('input');
+        input.className = 'tab-name-input';
+        input.value = tabs[tid].name;
+        ns.style.display = 'none';
+        ns.parentNode.insertBefore(input, ns);
+        input.focus();
+        input.select();
+
+        function finishRename() {
+          var val = input.value.trim();
+          if (val) {
+            tabs[tid].name = val;
+            ns.textContent = val;
+          }
+          input.remove();
+          ns.style.display = '';
+        }
+        input.addEventListener('blur', finishRename);
+        input.addEventListener('keydown', function(ev) {
+          if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
+          if (ev.key === 'Escape') { input.value = tabs[tid].name; input.blur(); }
+        });
+      };
+    })(id, nameSpan));
+
+    list.appendChild(item);
+  }
+}
+
+// === Create Core Element (per-tab control panel) ===
+
+function createCoreElement(state) {
+  var core = document.createElement('div');
+  core.className = 'evolva-window active evolva-core';
+  core.setAttribute('data-protected', '');
+  core.style.display = 'none';
+  core.innerHTML =
+    '<div class="window-header">' +
+      '<div><h2>Evolva</h2><p></p></div>' +
+      '<button class="collapse-toggle">&#9660;</button>' +
+    '</div>' +
+    '<div class="menu-bar">' +
+      '<button class="menu-btn menu-import"></button>' +
+      '<button class="menu-btn menu-export"></button>' +
+    '</div>' +
+    '<div class="log"></div>' +
+    '<div class="input-area">' +
+      '<textarea class="prompt-input" rows="1"></textarea>' +
+      '<button class="send-btn"><span class="send-arrow">&uarr;</span><span class="send-spinner" style="display:none">&#x27F3;</span></button>' +
+    '</div>' +
+    '<div class="context-bar">' +
+      '<div class="context-fill"></div>' +
+      '<span class="context-text">context 0 / 128k (0%)</span>' +
+    '</div>';
+
+  state.coreEl = core;
+  state.logEl = core.querySelector('.log');
+  state.promptEl = core.querySelector('.prompt-input');
+  state.sendBtn = core.querySelector('.send-btn');
+  state.sendArrow = core.querySelector('.send-arrow');
+  state.sendSpinner = core.querySelector('.send-spinner');
+  state.contextFill = core.querySelector('.context-fill');
+  state.contextText = core.querySelector('.context-text');
+  state.collapseToggle = core.querySelector('.collapse-toggle');
+
+  // 绑定事件
+  state.sendBtn.addEventListener('click', function() { mutate(state); });
+  state.promptEl.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); mutate(state); }
+  });
+  state.promptEl.addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 140) + 'px';
+  });
+  state.collapseToggle.addEventListener('click', function() {
+    var collapsed = core.classList.toggle('collapsed');
+    this.innerHTML = collapsed ? '&#9654;' : '&#9660;';
+  });
+  core.querySelector('.menu-export').addEventListener('click', function() { exportApp(state); });
+  core.querySelector('.menu-import').addEventListener('click', function() { importApp(state); });
+
+  // 设置菜单按钮文本
+  core.querySelector('.menu-import').textContent = t('importBtn');
+  core.querySelector('.menu-export').textContent = t('exportBtn');
+  core.querySelector('.window-header p').textContent = t('tagline');
+  state.promptEl.placeholder = t('placeholder');
+
+  // 拖拽
+  setupDraggable(core);
+
+  // 焦点管理
+  core.addEventListener('mousedown', function() { bringToFront(core); });
+
+  document.body.appendChild(core);
+  return core;
+}
+
+// === Mutation Space Init ===
+
+async function initMutationSpaceForTab(state) {
+  // 缓存 CSS 文本，避免重复请求
+  if (!cachedCssText) {
+    cachedCssText = await fetch('style.css').then(function(r) { return r.text(); });
+  }
+
+  var doc = state.iframe.contentDocument;
   doc.open();
-  doc.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><style>' + cssText + '</style></head>' +
+  doc.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><style>' + cachedCssText + '</style></head>' +
     '<body style="margin:0;padding:0;overflow:hidden;height:100vh;width:100vw;position:relative;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;' +
     'background:var(--bg-canvas);background-image:radial-gradient(var(--bg-dot) 1px,transparent 1px);background-size:20px 20px;color:var(--text-primary);"></body></html>');
   doc.close();
 
+  // 用 blob URL 加载 interact.js 避免重复网络请求
   var script = doc.createElement('script');
   script.src = 'https://cdn.jsdelivr.net/npm/interactjs/dist/interact.min.js';
   script.onload = function() {
-    setupMutationHelpers();
-    mutationSpaceReady = true;
+    setupMutationHelpers(state);
+    state.mutationSpaceReady = true;
   };
   doc.head.appendChild(script);
 
+  // 同步主题
   if (document.body.classList.contains('light')) {
     doc.documentElement.classList.add('light');
     doc.body.classList.add('light');
   }
 }
 
-function setupMutationHelpers() {
-  var win = mutationFrame.contentWindow;
-  var doc = mutationFrame.contentDocument;
+function setupMutationHelpers(state) {
+  var win = state.iframe.contentWindow;
+  var doc = state.iframe.contentDocument;
   var topZ = 100;
 
   win.setupDraggable = function(el) {
@@ -219,17 +470,32 @@ function setupMutationHelpers() {
 // === Theme ===
 function applyTheme(light) {
   document.body.classList.toggle('light', light);
-  localStorage.setItem('evolva_theme', light ? 'light' : 'dark');
-  if (mutationSpaceReady) {
-    var iframeDoc = mutationFrame.contentDocument;
-    iframeDoc.documentElement.classList.toggle('light', light);
-    iframeDoc.body.classList.toggle('light', light);
+  for (var id in tabs) {
+    var s = tabs[id];
+    if (s.mutationSpaceReady) {
+      var iframeDoc = s.iframe.contentDocument;
+      if (iframeDoc) {
+        iframeDoc.documentElement.classList.toggle('light', light);
+        iframeDoc.body.classList.toggle('light', light);
+      }
+    }
   }
 }
 
-function loadTheme() {
-  var saved = localStorage.getItem('evolva_theme');
-  applyTheme(saved === 'light');
+// === Language ===
+function applyLanguage() {
+  for (var id in tabs) {
+    var s = tabs[id];
+    if (!s.coreEl) continue;
+    s.coreEl.querySelector('.menu-import').textContent = t('importBtn');
+    s.coreEl.querySelector('.menu-export').textContent = t('exportBtn');
+    s.coreEl.querySelector('.window-header p').textContent = t('tagline');
+    s.promptEl.placeholder = t('placeholder');
+  }
+  // 全局按钮文本
+  document.getElementById('tab-settings').textContent = t('settings');
+  document.getElementById('tab-about').textContent = t('about');
+  updateTabBarUI();
 }
 
 // === Drag for evolva-core (main page only) ===
@@ -267,20 +533,15 @@ function setupDraggable(el) {
     });
 }
 
-setupDraggable(coreWindow);
-
 function bringToFront(el) {
   el.style.zIndex = 100;
-  document.querySelectorAll('.evolva-window').forEach(function(w) { w.classList.remove('active'); });
+  document.querySelectorAll('.evolva-core').forEach(function(w) { w.classList.remove('active'); });
   el.classList.add('active');
 }
 
-document.querySelectorAll('.evolva-window').forEach(function(w) {
-  w.addEventListener('mousedown', function() { bringToFront(w); });
-});
-
 // === Log ===
-function log(actor, message) {
+function log(state, actor, message) {
+  if (!state || !state.logEl) return;
   var entry = document.createElement('div');
   entry.className = 'log-entry';
   var time = document.createElement('span');
@@ -294,16 +555,21 @@ function log(actor, message) {
   entry.appendChild(time);
   entry.appendChild(actorEl);
   entry.appendChild(msg);
-  logEl.appendChild(entry);
-  logEl.scrollTop = logEl.scrollHeight;
+  state.logEl.appendChild(entry);
+  state.logEl.scrollTop = state.logEl.scrollHeight;
 }
 
-// === Settings (backend-managed) ===
-async function showSettingsDialog() {
-  var settings;
-  try { settings = await invoke('load_settings'); }
-  catch (err) { settings = { api_key: '', base_url: '', model: '', protocol: 'openai' }; }
+// === Settings Dialog ===
+function showSettingsDialog() {
+  var state = getActiveState();
+  invoke('load_settings').then(function(settings) {
+    buildSettingsDialog(state, settings);
+  }).catch(function() {
+    buildSettingsDialog(state, { api_key: '', base_url: '', model: '', protocol: 'openai' });
+  });
+}
 
+function buildSettingsDialog(state, settings) {
   var overlay = document.createElement('div');
   overlay.className = 'settings-overlay';
   var dlg = document.createElement('div');
@@ -342,17 +608,17 @@ async function showSettingsDialog() {
     this.classList.toggle('light', nowLight);
   });
 
+  dlg.querySelector('#dlg-lang').addEventListener('change', function() {
+    currentLang = this.value;
+    localStorage.setItem('evolva_lang', currentLang);
+    applyLanguage();
+  });
+
   dlg.querySelector('#dlg-key-toggle').addEventListener('click', function() {
     var input = dlg.querySelector('#dlg-api-key');
     var isPassword = input.type === 'password';
     input.type = isPassword ? 'text' : 'password';
     this.textContent = isPassword ? '\u{1F648}' : '\u{1F441}';
-  });
-
-  dlg.querySelector('#dlg-lang').addEventListener('change', function() {
-    currentLang = this.value;
-    localStorage.setItem('evolva_lang', currentLang);
-    applyLanguage();
   });
 
   dlg.querySelector('#dlg-save').addEventListener('click', async function() {
@@ -363,30 +629,21 @@ async function showSettingsDialog() {
           base_url: dlg.querySelector('#dlg-base-url').value.trim(),
           model: dlg.querySelector('#dlg-model').value.trim(),
           protocol: dlg.querySelector('#dlg-protocol').value,
+          theme: document.body.classList.contains('light') ? 'light' : 'dark',
+          language: currentLang,
         }
       });
-      log('system', t('logSettingsSaved'));
+      log(state, 'system', t('logSettingsSaved'));
       overlay.remove();
     } catch (err) {
-      log('error', t('logSettingsFailed') + String(err));
+      log(state, 'error', t('logSettingsFailed') + String(err));
     }
   });
 
   dlg.querySelector('#dlg-cancel').addEventListener('click', function() { overlay.remove(); });
 }
 
-// === Collapse Toggle ===
-collapseToggle.addEventListener('click', function() {
-  var isCollapsed = coreWindow.classList.toggle('collapsed');
-  collapseToggle.innerHTML = isCollapsed ? '&#9654;' : '&#9660;';
-});
-
-// === Menu Bar ===
-document.getElementById('menu-settings').addEventListener('click', function() { showSettingsDialog(); });
-
-// === About ===
-document.getElementById('menu-about').addEventListener('click', function() { showAboutDialog(); });
-
+// === About Dialog ===
 async function showAboutDialog() {
   var info = await invoke('get_app_info');
   var overlay = document.createElement('div');
@@ -414,10 +671,10 @@ async function showAboutDialog() {
 // === Export / Import ===
 var tauriDialog = window.__TAURI__.dialog;
 
-async function exportApp() {
+async function exportApp(state) {
   try {
-    var count = await invoke('get_mutation_count');
-    if (count === 0) { log('error', t('logNoMutations')); return; }
+    var count = await invoke('get_mutation_count', { tabId: state.id });
+    if (count === 0) { log(state, 'error', t('logNoMutations')); return; }
 
     var filePath = await tauriDialog.save({
       defaultPath: 'app.evolva.json',
@@ -425,17 +682,17 @@ async function exportApp() {
     });
     if (!filePath) return;
 
-    var name = filePath.split(/[\\/]/).pop().replace('.evolva.json', '').replace('.json', '');
-    await invoke('export_app', { path: filePath, name: name });
-    log('system', t('logExported', { count: count }));
+    var name = filePath.split(/[\/]/).pop().replace('.evolva.json', '').replace('.json', '');
+    await invoke('export_app', { path: filePath, name: name, tabId: state.id });
+    log(state, 'system', t('logExported', { count: count }));
   } catch (err) {
-    log('error', t('logExportFailed') + String(err));
+    log(state, 'error', t('logExportFailed') + String(err));
   }
 }
 
-async function importApp() {
+async function importApp(state) {
   try {
-    var count = await invoke('get_mutation_count');
+    var count = await invoke('get_mutation_count', { tabId: state.id });
     if (count > 0) {
       var confirmed = await showConfirmDialog(count);
       if (!confirmed) return;
@@ -447,23 +704,23 @@ async function importApp() {
     });
     if (!selected) return;
 
-    var codes = await invoke('import_app', { path: selected });
+    var codes = await invoke('import_app', { path: selected, tabId: state.id });
 
-    var iframeDoc = mutationFrame.contentDocument;
+    var iframeDoc = state.iframe.contentDocument;
     while (iframeDoc.body.firstChild) iframeDoc.body.removeChild(iframeDoc.body.firstChild);
     var headStyles = iframeDoc.head.querySelectorAll('style');
     headStyles.forEach(function(style, i) { if (i > 0) style.remove(); });
 
-    setupMutationHelpers();
+    setupMutationHelpers(state);
 
     for (var i = 0; i < codes.length; i++) {
-      injectCode(codes[i]);
+      injectCode(state, codes[i]);
     }
-    await invoke('auto_save');
-    updateContext();
-    log('system', t('logImported', { count: codes.length }));
+    await invoke('auto_save', { tabId: state.id, tabName: state.name });
+    updateContext(state);
+    log(state, 'system', t('logImported', { count: codes.length }));
   } catch (err) {
-    log('error', t('logImportFailed') + String(err));
+    log(state, 'error', t('logImportFailed') + String(err));
   }
 }
 
@@ -471,7 +728,6 @@ async function importApp() {
 function showConfirmDialog(count) {
   return new Promise(function(resolve) {
     var overlay = document.createElement('div');
-    overlay.id = 'confirm-overlay';
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center;';
 
     var dialog = document.createElement('div');
@@ -490,26 +746,24 @@ function showConfirmDialog(count) {
   });
 }
 
-document.getElementById('menu-export').addEventListener('click', exportApp);
-document.getElementById('menu-import').addEventListener('click', importApp);
-
 // === Context Bar ===
-async function updateContext() {
+async function updateContext(state) {
+  if (!state || !state.mutationSpaceReady) return;
   try {
-    var dom = mutationFrame.contentDocument.documentElement.outerHTML;
+    var dom = state.iframe.contentDocument.documentElement.outerHTML;
     var est = await invoke('estimate_tokens', { dom: dom });
-    contextFill.style.width = est.percentage + '%';
+    state.contextFill.style.width = est.percentage + '%';
     var maxK = Math.round(est.max_tokens / 1000);
-    contextText.textContent = 'context ' + est.tokens + ' / ' + maxK + 'k (' + est.percentage.toFixed(1) + '%)';
-    contextFill.classList.remove('warning', 'danger');
-    if (est.percentage > 96) contextFill.classList.add('danger');
-    else if (est.percentage > 72) contextFill.classList.add('warning');
+    state.contextText.textContent = 'context ' + est.tokens + ' / ' + maxK + 'k (' + est.percentage.toFixed(1) + '%)';
+    state.contextFill.classList.remove('warning', 'danger');
+    if (est.percentage > 96) state.contextFill.classList.add('danger');
+    else if (est.percentage > 72) state.contextFill.classList.add('warning');
   } catch (_) {}
 }
 
-// === Script Injection (into iframe) ===
-function injectCode(code) {
-  var iframeDoc = mutationFrame.contentDocument;
+// === Script Injection ===
+function injectCode(state, code) {
+  var iframeDoc = state.iframe.contentDocument;
   var script = iframeDoc.createElement('script');
   script.textContent = '(async () => {\n' + code + '\n})();';
   iframeDoc.body.appendChild(script);
@@ -517,107 +771,64 @@ function injectCode(code) {
 }
 
 // === Mutation Loop ===
-async function mutate() {
-  if (processing || !mutationSpaceReady) return;
+async function mutate(state) {
+  if (!state || state.processing || !state.mutationSpaceReady) return;
 
-  var userMsg = promptEl.value.trim();
+  var userMsg = state.promptEl.value.trim();
   if (!userMsg) return;
 
-  processing = true;
-  sendBtn.classList.add('loading');
-  sendArrow.style.display = 'none';
-  sendSpinner.style.display = 'inline';
-  promptEl.value = '';
-  promptEl.disabled = true;
+  state.processing = true;
+  state.sendBtn.classList.add('loading');
+  state.sendArrow.style.display = 'none';
+  state.sendSpinner.style.display = 'inline';
+  state.promptEl.value = '';
+  state.promptEl.disabled = true;
 
   try {
-    log('user', userMsg);
+    log(state, 'user', userMsg);
 
-    var dom = mutationFrame.contentDocument.documentElement.outerHTML;
-    log('system', t('logDomCaptured', { tokens: Math.round(dom.length / 4), chars: dom.length }));
+    var dom = state.iframe.contentDocument.documentElement.outerHTML;
+    log(state, 'system', t('logDomCaptured', { tokens: Math.round(dom.length / 4), chars: dom.length }));
 
     var result = await invoke('call_llm', {
       req: { dom: dom, instruction: userMsg },
     });
 
-    log('system', t('logLlmResponded', {
+    log(state, 'system', t('logLlmResponded', {
       chars: result.raw.length,
       code: result.code ? result.code.length + ' chars' : 'none'
     }));
 
     if (!result.code) {
-      log('error', t('logNoCode'));
+      log(state, 'error', t('logNoCode'));
       console.log('LLM raw response:', result.raw);
       return;
     }
 
     try {
-      injectCode(result.code);
-      log('system', t('logInjected'));
+      injectCode(state, result.code);
+      log(state, 'system', t('logInjected'));
     } catch (injectErr) {
-      log('error', t('logInjectionFailed') + String(injectErr));
+      log(state, 'error', t('logInjectionFailed') + String(injectErr));
       console.log('Failed code:', result.code);
       return;
     }
 
-    await invoke('save_mutation', { instruction: userMsg, code: result.code });
-    await invoke('auto_save');
-    log('system', t('logMutationApplied'));
-    promptEl.style.height = 'auto';
-    updateContext();
+    await invoke('save_mutation', { tabId: state.id, instruction: userMsg, code: result.code });
+    await invoke('auto_save', { tabId: state.id, tabName: state.name });
+    log(state, 'system', t('logMutationApplied'));
+    state.promptEl.style.height = 'auto';
+    updateContext(state);
   } catch (err) {
-    log('error', String(err));
+    log(state, 'error', String(err));
   } finally {
-    processing = false;
-    sendBtn.classList.remove('loading');
-    sendArrow.style.display = 'inline';
-    sendSpinner.style.display = 'none';
-    promptEl.disabled = false;
+    state.processing = false;
+    state.sendBtn.classList.remove('loading');
+    state.sendArrow.style.display = 'inline';
+    state.sendSpinner.style.display = 'none';
+    state.promptEl.disabled = false;
   }
 }
-
-// === Event Handlers ===
-sendBtn.addEventListener('click', mutate);
-
-promptEl.addEventListener('keydown', function(e) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    mutate();
-  }
-});
-
-promptEl.addEventListener('input', function() {
-  promptEl.style.height = 'auto';
-  promptEl.style.height = Math.min(promptEl.scrollHeight, 140) + 'px';
-});
-
-// === Init ===
-(async function() {
-  applyLanguage();
-  loadTheme();
-  await initMutationSpace();
-
-  // Auto-load: check for previous session
-  try {
-    var result = await invoke('auto_load');
-    if (result && result.length > 0) {
-      var restore = await showRestoreDialog(result.length);
-      if (restore) {
-        for (var i = 0; i < result.length; i++) {
-          injectCode(result[i]);
-        }
-        updateContext();
-        log('system', t('logAutoLoaded', { count: result.length }));
-      } else {
-        log('system', t('logAutoLoadSkipped'));
-      }
-    }
-  } catch (_) {}
-
-  updateContext();
-  promptEl.focus();
-  log('system', t('logInit'));
-})();
 
 // === Restore Dialog ===
 function showRestoreDialog(count) {
@@ -627,7 +838,7 @@ function showRestoreDialog(count) {
 
     var dialog = document.createElement('div');
     dialog.style.cssText = 'background:var(--bg-window);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:360px;text-align:center;font-family:inherit;color:var(--text-primary);';
-    dialog.innerHTML = '<p style="margin-bottom:16px;font-size:13px;line-height:1.5;">' + t('confirmAutoLoad', { count: count }) + '</p>' +
+    dialog.innerHTML = '<p style="margin-bottom:16px;font-size:13px;line-height:1.5;">' + t('confirmRestoreAll', { count: count }) + '</p>' +
       '<div style="display:flex;gap:10px;justify-content:center;">' +
       '<button id="restore-cancel" style="background:var(--btn-bg);color:var(--text-primary);border:1px solid var(--btn-border);padding:7px 18px;border-radius:5px;cursor:pointer;font-size:12px;">' + t('cancel') + '</button>' +
       '<button id="restore-ok" style="background:var(--accent);color:var(--accent-on);border:none;padding:7px 18px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">' + t('ok') + '</button>' +
@@ -640,3 +851,93 @@ function showRestoreDialog(count) {
     dialog.querySelector('#restore-cancel').addEventListener('click', function() { overlay.remove(); resolve(false); });
   });
 }
+
+// === Keyboard Shortcuts ===
+document.addEventListener('keydown', function(e) {
+  if (e.ctrlKey && e.key === 't') {
+    e.preventDefault();
+    createTab().then(function(s) { if (s) switchTab(s.id); });
+  }
+  if (e.ctrlKey && e.key === 'w') {
+    e.preventDefault();
+    if (activeTabId) closeTab(activeTabId);
+  }
+  if (e.ctrlKey && e.key === 'Tab') {
+    e.preventDefault();
+    var ids = Object.keys(tabs);
+    if (ids.length <= 1) return;
+    var idx = ids.indexOf(activeTabId);
+    var next = e.shiftKey ? (idx - 1 + ids.length) % ids.length : (idx + 1) % ids.length;
+    switchTab(ids[next]);
+  }
+});
+
+// === Tab Bar Buttons ===
+document.getElementById('tab-new').addEventListener('click', function() {
+  createTab().then(function(s) { if (s) switchTab(s.id); });
+});
+document.getElementById('tab-settings').addEventListener('click', function() {
+  showSettingsDialog();
+});
+document.getElementById('tab-about').addEventListener('click', showAboutDialog);
+
+// === Init ===
+(async function() {
+  // 从后端设置加载主题和语言（以配置文件为准）
+  try {
+    var savedSettings = await invoke('load_settings');
+    if (savedSettings.language) {
+      currentLang = savedSettings.language;
+      localStorage.setItem('evolva_lang', currentLang);
+    }
+    if (savedSettings.theme) {
+      applyTheme(savedSettings.theme === 'light');
+    }
+  } catch (_) {}
+
+  applyLanguage();
+
+  // 尝试恢复上次会话
+  try {
+    var savedTabs = await invoke('list_saved_tabs');
+    if (savedTabs && savedTabs.length > 0) {
+      var restore = await showRestoreDialog(savedTabs.length);
+      if (restore) {
+        for (var i = 0; i < savedTabs.length; i++) {
+          var saved = savedTabs[i];
+          var st = await createTab(saved.name);
+          if (!st) continue;
+          switchTab(st.id);
+          try {
+            var codes = await invoke('auto_load', { tabId: saved.tab_id });
+            if (codes && codes.length > 0) {
+              for (var j = 0; j < codes.length; j++) {
+                injectCode(st, codes[j]);
+              }
+              updateContext(st);
+            }
+            log(st, 'system', t('logAutoLoaded', { count: codes ? codes.length : 0 }));
+          } catch (err) {
+            log(st, 'error', t('logImportFailed') + String(err));
+          }
+        }
+        switchTab(Object.keys(tabs)[0]);
+      } else {
+        await createTab(t('tabDefault', { n: 1 }));
+        var skipState = getActiveState();
+        if (skipState) log(skipState, 'system', t('logAutoLoadSkipped'));
+      }
+    } else {
+      await createTab(t('tabDefault', { n: 1 }));
+    }
+  } catch (_) {
+    await createTab(t('tabDefault', { n: 1 }));
+  }
+
+  var initState = getActiveState();
+  if (initState) {
+    switchTab(initState.id);
+    initState.promptEl.focus();
+    log(initState, 'system', t('logInit'));
+  }
+})();

@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -49,6 +50,10 @@ struct Settings {
     model: String,
     #[serde(default = "default_protocol")]
     protocol: String,
+    #[serde(default)]
+    theme: String,
+    #[serde(default)]
+    language: String,
 }
 
 fn default_base_url() -> String {
@@ -68,6 +73,8 @@ impl Default for Settings {
             base_url: default_base_url(),
             model: default_model(),
             protocol: default_protocol(),
+            theme: String::new(),
+            language: String::new(),
         }
     }
 }
@@ -114,10 +121,11 @@ fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join("settings.json"))
 }
 
-fn auto_save_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+fn auto_save_path(app: &tauri::AppHandle, tab_id: &str) -> Result<std::path::PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("app.evolva.json"))
+    let safe_id = tab_id.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "_");
+    Ok(dir.join(format!("app_{}.evolva.json", safe_id)))
 }
 
 fn load_settings_from_file(app: &tauri::AppHandle) -> Settings {
@@ -367,28 +375,35 @@ fn estimate_tokens(dom: String) -> TokenEstimate {
 
 #[tauri::command]
 fn save_mutation(
-    state: tauri::State<'_, Mutex<Vec<Mutation>>>,
+    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
+    tab_id: String,
     instruction: String,
     code: String,
 ) -> Result<(), String> {
-    let mut list = state.lock().map_err(|e| e.to_string())?;
+    let mut map = state.lock().map_err(|e| e.to_string())?;
+    let list = map.entry(tab_id).or_insert_with(Vec::new);
     list.push(Mutation { instruction, code });
     Ok(())
 }
 
 #[tauri::command]
-fn get_mutation_count(state: tauri::State<'_, Mutex<Vec<Mutation>>>) -> Result<usize, String> {
-    let list = state.lock().map_err(|e| e.to_string())?;
-    Ok(list.len())
+fn get_mutation_count(
+    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
+    tab_id: String,
+) -> Result<usize, String> {
+    let map = state.lock().map_err(|e| e.to_string())?;
+    Ok(map.get(&tab_id).map(|v| v.len()).unwrap_or(0))
 }
 
 #[tauri::command]
 fn export_app(
-    state: tauri::State<'_, Mutex<Vec<Mutation>>>,
+    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
     path: String,
     name: String,
+    tab_id: String,
 ) -> Result<(), String> {
-    let list = state.lock().map_err(|e| e.to_string())?;
+    let map = state.lock().map_err(|e| e.to_string())?;
+    let list = map.get(&tab_id).ok_or("Tab not found".to_string())?;
     if list.is_empty() {
         return Err("No mutations to export".to_string());
     }
@@ -407,8 +422,9 @@ fn export_app(
 
 #[tauri::command]
 fn import_app(
-    state: tauri::State<'_, Mutex<Vec<Mutation>>>,
+    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
     path: String,
+    tab_id: String,
 ) -> Result<Vec<String>, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let data: serde_json::Value =
@@ -432,23 +448,41 @@ fn import_app(
         .map(|m| m.code.clone())
         .collect();
 
-    let mut list = state.lock().map_err(|e| e.to_string())?;
-    *list = versions;
+    let mut map = state.lock().map_err(|e| e.to_string())?;
+    map.insert(tab_id, versions);
 
     Ok(codes)
 }
 
 #[tauri::command]
-fn clear_mutations(state: tauri::State<'_, Mutex<Vec<Mutation>>>) -> Result<(), String> {
-    let mut list = state.lock().map_err(|e| e.to_string())?;
-    list.clear();
+fn clear_mutations(
+    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
+    tab_id: String,
+) -> Result<(), String> {
+    let mut map = state.lock().map_err(|e| e.to_string())?;
+    map.remove(&tab_id);
     Ok(())
 }
 
 #[tauri::command]
-fn auto_save(state: tauri::State<'_, Mutex<Vec<Mutation>>>, app: tauri::AppHandle) -> Result<(), String> {
-    let list = state.lock().map_err(|e| e.to_string())?;
-    let path = auto_save_path(&app)?;
+fn auto_save(
+    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
+    app: tauri::AppHandle,
+    tab_id: String,
+    tab_name: String,
+) -> Result<(), String> {
+    let map = state.lock().map_err(|e| e.to_string())?;
+    let path = auto_save_path(&app, &tab_id)?;
+
+    let list = match map.get(&tab_id) {
+        Some(l) => l,
+        None => {
+            if path.exists() {
+                std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+            }
+            return Ok(());
+        }
+    };
 
     if list.is_empty() {
         if path.exists() {
@@ -460,7 +494,7 @@ fn auto_save(state: tauri::State<'_, Mutex<Vec<Mutation>>>, app: tauri::AppHandl
     let active_version = list.len() - 1;
     let data = ExportData {
         version: 1,
-        name: "app".to_string(),
+        name: tab_name,
         created_at: chrono::Utc::now().to_rfc3339(),
         active_version,
         versions: list.clone(),
@@ -471,8 +505,12 @@ fn auto_save(state: tauri::State<'_, Mutex<Vec<Mutation>>>, app: tauri::AppHandl
 }
 
 #[tauri::command]
-fn auto_load(state: tauri::State<'_, Mutex<Vec<Mutation>>>, app: tauri::AppHandle) -> Result<Option<Vec<String>>, String> {
-    let path = auto_save_path(&app)?;
+fn auto_load(
+    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
+    app: tauri::AppHandle,
+    tab_id: String,
+) -> Result<Option<Vec<String>>, String> {
+    let path = auto_save_path(&app, &tab_id)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -499,10 +537,56 @@ fn auto_load(state: tauri::State<'_, Mutex<Vec<Mutation>>>, app: tauri::AppHandl
         .map(|m| m.code.clone())
         .collect();
 
-    let mut list = state.lock().map_err(|e| e.to_string())?;
-    *list = versions;
+    let mut map = state.lock().map_err(|e| e.to_string())?;
+    map.insert(tab_id, versions);
 
     Ok(Some(codes))
+}
+
+// === Tab Save Management ===
+
+#[derive(Serialize)]
+struct SavedTab {
+    tab_id: String,
+    name: String,
+}
+
+#[tauri::command]
+fn list_saved_tabs(app: tauri::AppHandle) -> Result<Vec<SavedTab>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+    let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    for entry in entries {
+        if let Ok(entry) = entry {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("app_tab-") && name.ends_with(".evolva.json") {
+                let tab_id = name
+                    .trim_start_matches("app_")
+                    .trim_end_matches(".evolva.json")
+                    .to_string();
+                // 尝试读取文件获取标签页名称
+                let tab_name = std::fs::read_to_string(entry.path())
+                    .ok()
+                    .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                    .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                    .unwrap_or_else(|| tab_id.clone());
+                result.push(SavedTab { tab_id, name: tab_name });
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn delete_tab_save(app: tauri::AppHandle, tab_id: String) -> Result<(), String> {
+    let path = auto_save_path(&app, &tab_id)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -525,7 +609,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .manage(Mutex::new(Vec::<Mutation>::new()))
+        .manage(Mutex::new(HashMap::<String, Vec<Mutation>>::new()))
         .invoke_handler(tauri::generate_handler![
             load_settings,
             save_settings,
@@ -538,6 +622,8 @@ pub fn run() {
             clear_mutations,
             auto_save,
             auto_load,
+            list_saved_tabs,
+            delete_tab_save,
             get_app_info,
         ])
         .run(tauri::generate_context!())
