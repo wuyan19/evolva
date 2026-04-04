@@ -130,7 +130,7 @@
       border: 1px solid var(--border);
       border-radius: 10px;
       padding: 20px 24px;
-      width: 360px;
+      width: 440px;
       display: flex;
       flex-direction: column;
       gap: 10px;
@@ -403,28 +403,6 @@
     </div>
   </div>
 
-  <script type="text/plain" id="system-prompt">You are Evolva, a self-evolving application. Your job is to modify the webpage based on user instructions.
-
-**CRITICAL — NEVER modify, remove, or hide any element with `data-protected` attribute, nor any of its descendants. This includes the entire #evolva-core control panel (menu bar, log, input area, context bar). NEVER modify overlay/modal elements either (settings dialog, about dialog, confirm dialogs). Violating this rule breaks the application.**
-
-Notes:
-- The log area only shows the last 10 entries — this is intentional truncation, not a bug
-- #evolva-core may appear collapsed (menu bar, log, input hidden) — this is a toggle state, do not "fix" it
-
-Rules:
-1. Generate ONLY a ```javascript code block — no explanations before or after
-2. When creating new UI elements, wrap them in a draggable window:
-   - Create a div with class="evolva-window" with position:absolute, set explicit top/left/width/height
-   - .evolva-window uses flex column layout — content flows vertically by default
-   - Add a child div with class="window-header" as the drag handle, include an h2 title inside
-   - Call setupDraggable(newElement) to enable drag/resize
-   - Set mousedown listener: el.addEventListener('mousedown', () => bringToFront(el))
-   - bringToFront(el) sets the window as active (adds .active class for highlight border/shadow)
-3. For keyboard input (games, shortcuts), use onActiveKeydown(windowEl, handler) and onActiveKeyup(windowEl, handler). These only fire when the window is active. Do NOT use document.addEventListener('keydown') directly
-4. Use `import` from `https://esm.sh/` for external libraries
-5. Use CSS variables to match the theme: --accent, --bg-window, --bg-header, --bg-input, --border, --text-primary, --text-muted, --btn-bg, --btn-border, --color-error, --color-warning
-6. Keep code concise to save token space</script>
-
   <script>
     // Tauri environment check
     if (!window.__TAURI__) {
@@ -524,10 +502,8 @@ Rules:
     window.bringToFront = bringToFront;
 
     // --- Keyboard Focus Router ---
-    // Maps window element -> { keydown: [callbacks], keyup: [callbacks] }
     const windowKeyHandlers = new Map();
 
-    // Register keyboard handlers scoped to a window (only fires when that window is active)
     window.onActiveKeydown = function(windowEl, handler) {
       if (!windowKeyHandlers.has(windowEl)) {
         windowKeyHandlers.set(windowEl, { keydown: [], keyup: [] });
@@ -542,9 +518,7 @@ Rules:
       windowKeyHandlers.get(windowEl).keyup.push(handler);
     };
 
-    // Route global keyboard events to the active window's handlers only
     document.addEventListener('keydown', function(e) {
-      // Don't intercept when typing in inputs/textareas
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
       const activeWin = document.querySelector('.evolva-window.active');
       if (!activeWin) return;
@@ -583,27 +557,17 @@ Rules:
       logEl.scrollTop = logEl.scrollHeight;
     }
 
-    // --- Settings ---
-    function loadSettings() {
-      // Settings are loaded from localStorage when dialog opens
-    }
+    // --- Settings (backend-managed) ---
+    async function showSettingsDialog() {
+      let settings;
+      try {
+        settings = await invoke('load_settings');
+      } catch (err) {
+        settings = { api_key: '', base_url: '', model: '', protocol: 'openai' };
+      }
 
-    function saveSettings() {
-      const dialog = document.querySelector('.settings-dialog');
-      if (!dialog) return;
-      localStorage.setItem('evolva_key', dialog.querySelector('#dlg-api-key').value.trim());
-      localStorage.setItem('evolva_base', dialog.querySelector('#dlg-base-url').value.trim());
-      localStorage.setItem('evolva_model', dialog.querySelector('#dlg-model').value.trim());
-      localStorage.setItem('evolva_protocol', dialog.querySelector('#dlg-protocol').value);
-      log('system', 'Settings saved.');
-      dialog.closest('.settings-overlay').remove();
-    }
-
-    function showSettingsDialog() {
       const overlay = document.createElement('div');
       overlay.className = 'settings-overlay';
-      overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-
       const dlg = document.createElement('div');
       dlg.className = 'settings-dialog';
       const isLight = document.body.classList.contains('light');
@@ -626,11 +590,11 @@ Rules:
       overlay.appendChild(dlg);
       document.body.appendChild(overlay);
 
-      // Load current values
-      dlg.querySelector('#dlg-api-key').value = localStorage.getItem('evolva_key') || '';
-      dlg.querySelector('#dlg-base-url').value = localStorage.getItem('evolva_base') || '';
-      dlg.querySelector('#dlg-model').value = localStorage.getItem('evolva_model') || '';
-      dlg.querySelector('#dlg-protocol').value = localStorage.getItem('evolva_protocol') || 'openai';
+      // Populate current values from backend
+      dlg.querySelector('#dlg-api-key').value = settings.api_key || '';
+      dlg.querySelector('#dlg-base-url').value = settings.base_url || '';
+      dlg.querySelector('#dlg-model').value = settings.model || '';
+      dlg.querySelector('#dlg-protocol').value = settings.protocol || 'openai';
 
       // Theme toggle inside dialog
       dlg.querySelector('#dlg-theme').addEventListener('click', function() {
@@ -639,7 +603,23 @@ Rules:
         this.classList.toggle('light', nowLight);
       });
 
-      dlg.querySelector('#dlg-save').addEventListener('click', saveSettings);
+      dlg.querySelector('#dlg-save').addEventListener('click', async () => {
+        try {
+          await invoke('save_settings', {
+            settings: {
+              api_key: dlg.querySelector('#dlg-api-key').value.trim(),
+              base_url: dlg.querySelector('#dlg-base-url').value.trim(),
+              model: dlg.querySelector('#dlg-model').value.trim(),
+              protocol: dlg.querySelector('#dlg-protocol').value,
+            }
+          });
+          log('system', 'Settings saved.');
+          overlay.remove();
+        } catch (err) {
+          log('error', 'Failed to save settings: ' + String(err));
+        }
+      });
+
       dlg.querySelector('#dlg-cancel').addEventListener('click', () => overlay.remove());
     }
 
@@ -780,64 +760,23 @@ Rules:
     menuExport.addEventListener('click', exportApp);
     menuImport.addEventListener('click', importApp);
 
-    // --- Context Bar ---
-    function updateContext() {
-      const dom = document.documentElement.outerHTML;
-      const tokens = Math.round(dom.length / 4);
-      const maxTokens = 128000;
-      const pct = Math.min((tokens / maxTokens) * 100, 100);
-      contextFill.style.width = pct + '%';
-      contextText.textContent = 'context ' + tokens + ' / 128k (' + pct.toFixed(1) + '%)';
-      contextFill.classList.remove('warning', 'danger');
-      if (pct > 96) contextFill.classList.add('danger');
-      else if (pct > 72) contextFill.classList.add('warning');
-    }
-
-    // --- DOM Capture ---
-    function captureDom() {
-      let html = document.documentElement.outerHTML;
-
-      // 1. Strip system prompt first
-      html = html.replace(
-        /<script type="text\/plain" id="system-prompt">[\s\S]*?<\/script>/,
-        '<!-- system prompt omitted -->'
-      );
-
-      // 2. Strip all remaining <script> tags
-      html = html.replace(/<script[\s\S]*?<\/script>/gi, '');
-
-      // 3. Truncate log entries to last 10
-      while (logEl.children.length > 10) {
-        logEl.removeChild(logEl.children[0]);
+    // --- Context Bar (backend token estimation) ---
+    async function updateContext() {
+      try {
+        const est = await invoke('estimate_tokens', { dom: document.documentElement.outerHTML });
+        contextFill.style.width = est.percentage + '%';
+        const maxK = Math.round(est.max_tokens / 1000);
+        contextText.textContent = 'context ' + est.tokens + ' / ' + maxK + 'k (' + est.percentage.toFixed(1) + '%)';
+        contextFill.classList.remove('warning', 'danger');
+        if (est.percentage > 96) contextFill.classList.add('danger');
+        else if (est.percentage > 72) contextFill.classList.add('warning');
+      } catch (_) {
+        // silently ignore
       }
-
-      return html;
     }
 
-    // --- Code Extraction ---
-    function extractCode(response) {
-      const patterns = [
-        /```(?:javascript|js|jsx|ts|typescript)?\s*\n([\s\S]*?)```/,
-        /~~~(?:javascript|js|jsx|ts|typescript)?\s*\n([\s\S]*?)~~~/,
-      ];
-      for (const pattern of patterns) {
-        const match = response.match(pattern);
-        if (match) return match[1].trim();
-      }
-      return null;
-    }
-
-    // --- Script Injection ---
+    // --- Script Injection (simplified — no require conversion) ---
     function injectCode(code) {
-      code = code.replace(
-        /(?:const|let|var)\s+(\w+)\s*=\s*require\(['"]([\w@/.\\-]+)['"]\)/g,
-        'const $1 = (await import("https://esm.sh/$2"))'
-      );
-      code = code.replace(
-        /require\(['"]([\w@/.\\-]+)['"]\)/g,
-        '(await import("https://esm.sh/$1"))'
-      );
-
       const script = document.createElement('script');
       script.textContent = '(async () => {\n' + code + '\n})();';
       document.body.appendChild(script);
@@ -848,16 +787,6 @@ Rules:
     async function mutate() {
       if (processing) return;
 
-      const apiKey = (localStorage.getItem('evolva_key') || '').trim();
-      const baseUrl = (localStorage.getItem('evolva_base') || '').trim();
-      const model = (localStorage.getItem('evolva_model') || '').trim();
-      const protocol = (localStorage.getItem('evolva_protocol') || 'openai').trim();
-
-      if (!apiKey && !baseUrl) {
-        log('error', 'Configure settings first');
-        return;
-      }
-
       const userMsg = promptEl.value.trim();
       if (!userMsg) return;
 
@@ -865,36 +794,31 @@ Rules:
       sendBtn.classList.add('loading');
       sendArrow.style.display = 'none';
       sendSpinner.style.display = 'inline';
+      promptEl.value = '';
       promptEl.disabled = true;
 
       try {
         log('user', userMsg);
 
-        const systemPrompt = document.getElementById('system-prompt').textContent;
-        const dom = captureDom();
+        // Truncate log entries to last 10 (DOM manipulation must happen in frontend)
+        while (logEl.children.length > 10) {
+          logEl.removeChild(logEl.children[0]);
+        }
 
+        // Send raw DOM to backend — backend handles capture, system prompt, code extraction, require conversion
         const result = await invoke('call_llm', {
-          req: {
-            protocol,
-            api_key: apiKey,
-            base_url: baseUrl,
-            model,
-            system: systemPrompt,
-            user: 'Current DOM:\n```\n' + dom + '\n```\n\nUser instruction: ' + userMsg,
-          },
+          req: { dom: document.documentElement.outerHTML, instruction: userMsg },
         });
 
-        const code = extractCode(result);
-        if (!code) {
+        if (!result.code) {
           log('error', 'No JavaScript code block found');
-          console.log('LLM response:', result);
+          console.log('LLM response:', result.raw);
           return;
         }
 
-        injectCode(code);
-        await invoke('save_mutation', { instruction: userMsg, code });
+        injectCode(result.code);
+        await invoke('save_mutation', { instruction: userMsg, code: result.code });
         log('system', 'Mutation applied.');
-        promptEl.value = '';
         promptEl.style.height = 'auto';
         updateContext();
       } catch (err) {
@@ -912,7 +836,7 @@ Rules:
     sendBtn.addEventListener('click', mutate);
 
     promptEl.addEventListener('keydown', (e) => {
-      if (e.ctrlKey && e.key === 'Enter') {
+      if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         mutate();
       }
@@ -925,7 +849,6 @@ Rules:
 
     // --- Init ---
     loadTheme();
-    loadSettings();
     updateContext();
     log('system', 'Evolva initialized. Configure settings to begin.');
   </script>

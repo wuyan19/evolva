@@ -1,5 +1,65 @@
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+use tauri::Manager;
+
+// === Compiled-in System Prompt ===
+const SYSTEM_PROMPT: &str = r#"You are Evolva, a self-evolving application. Your job is to modify the webpage based on user instructions.
+
+**CRITICAL — NEVER modify, remove, or hide any element with `data-protected` attribute, nor any of its descendants. This includes the entire #evolva-core control panel (menu bar, log, input area, context bar). NEVER modify overlay/modal elements either (settings dialog, about dialog, confirm dialogs). Violating this rule breaks the application.**
+
+Notes:
+- The log area only shows the last 10 entries — this is intentional truncation, not a bug
+- #evolva-core may appear collapsed (menu bar, log, input hidden) — this is a toggle state, do not "fix" it
+
+Rules:
+1. Generate ONLY a ```javascript code block — no explanations before or after
+2. When creating new UI elements, wrap them in a draggable window:
+   - Create a div with class="evolva-window" with position:absolute, set explicit top/left/width/height
+   - .evolva-window uses flex column layout — content flows vertically by default
+   - Add a child div with class="window-header" as the drag handle, include an h2 title inside
+   - Call setupDraggable(newElement) to enable drag/resize
+   - Set mousedown listener: el.addEventListener('mousedown', () => bringToFront(el))
+   - bringToFront(el) sets the window as active (adds .active class for highlight border/shadow)
+3. For keyboard input (games, shortcuts), use onActiveKeydown(windowEl, handler) and onActiveKeyup(windowEl, handler). These only fire when the window is active. Do NOT use document.addEventListener('keydown') directly
+4. Use `import` from `https://esm.sh/` for external libraries
+5. Use CSS variables to match the theme: --accent, --bg-window, --bg-header, --bg-input, --border, --text-primary, --text-muted, --btn-bg, --btn-border, --color-error, --color-warning
+6. Keep code concise to save token space"#;
+
+// === Types ===
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Settings {
+    #[serde(default)]
+    api_key: String,
+    #[serde(default = "default_base_url")]
+    base_url: String,
+    #[serde(default = "default_model")]
+    model: String,
+    #[serde(default = "default_protocol")]
+    protocol: String,
+}
+
+fn default_base_url() -> String {
+    "https://api.openai.com/v1".to_string()
+}
+fn default_model() -> String {
+    "gpt-4o".to_string()
+}
+fn default_protocol() -> String {
+    "openai".to_string()
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            api_key: String::new(),
+            base_url: default_base_url(),
+            model: default_model(),
+            protocol: default_protocol(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Mutation {
@@ -18,22 +78,111 @@ struct ExportData {
 
 #[derive(Deserialize)]
 struct LlmRequest {
-    protocol: String,
-    api_key: String,
-    base_url: String,
-    model: String,
-    system: String,
-    user: String,
+    dom: String,
+    instruction: String,
 }
 
-async fn call_openai(req: &LlmRequest) -> Result<String, String> {
+#[derive(Serialize)]
+struct LlmResult {
+    code: Option<String>,
+    raw: String,
+}
+
+#[derive(Serialize)]
+struct TokenEstimate {
+    tokens: usize,
+    max_tokens: usize,
+    percentage: f64,
+}
+
+// === Helper Functions ===
+
+fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("settings.json"))
+}
+
+fn load_settings_from_file(app: &tauri::AppHandle) -> Settings {
+    let path = match settings_path(app) {
+        Ok(p) => p,
+        Err(_) => return Settings::default(),
+    };
+    if !path.exists() {
+        return Settings::default();
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Settings::default(),
+    };
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+/// Strip all <script> tags from HTML (case-insensitive)
+fn strip_script_tags(html: &str) -> String {
+    let re = Regex::new(r"(?i)<script[\s\S]*?</script>").unwrap();
+    re.replace_all(html, "").to_string()
+}
+
+/// Compress whitespace: collapse multiple blank lines into one
+fn compress_whitespace(html: &str) -> String {
+    let re = Regex::new(r"\n{3,}").unwrap();
+    re.replace_all(html.trim(), "\n\n").to_string()
+}
+
+/// Capture and compress DOM: strip scripts, compress whitespace
+fn capture_dom(html: &str) -> String {
+    let stripped = strip_script_tags(html);
+    compress_whitespace(&stripped)
+}
+
+/// Extract JS code from LLM markdown response
+fn extract_code(response: &str) -> Option<String> {
+    let patterns = [
+        r"```(?:javascript|js|jsx|ts|typescript)?\s*\n([\s\S]*?)```",
+        r"~~~(?:javascript|js|jsx|ts|typescript)?\s*\n([\s\S]*?)~~~",
+    ];
+    for pat in &patterns {
+        let re = Regex::new(pat).unwrap();
+        if let Some(caps) = re.captures(response) {
+            if let Some(m) = caps.get(1) {
+                return Some(m.as_str().trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Convert require('pkg') to esm.sh dynamic imports
+fn convert_requires(code: &str) -> String {
+    // (const|let|var) x = require('pkg') → const x = (await import("https://esm.sh/pkg"))
+    let re1 = Regex::new(r#"(?:const|let|var)\s+(\w+)\s*=\s*require\(['"]([\w@/.\\-]+)['"]\)"#).unwrap();
+    let step1 = re1
+        .replace_all(code, r#"const $1 = (await import("https://esm.sh/$2"))"#)
+        .to_string();
+
+    // require('pkg') → (await import("https://esm.sh/pkg"))
+    let re2 = Regex::new(r#"require\(['"]([\w@/.\\-]+)['"]\)"#).unwrap();
+    re2.replace_all(&step1, r#"(await import("https://esm.sh/$1"))"#)
+        .to_string()
+}
+
+// === LLM API Calls ===
+
+async fn call_openai(
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+) -> Result<String, String> {
     let client = reqwest::Client::new();
     let mut headers = reqwest::header::HeaderMap::new();
 
-    if !req.api_key.is_empty() {
+    if !api_key.is_empty() {
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", req.api_key).parse().unwrap(),
+            format!("Bearer {}", api_key).parse().unwrap(),
         );
     }
     headers.insert(
@@ -41,13 +190,13 @@ async fn call_openai(req: &LlmRequest) -> Result<String, String> {
         "application/json".parse().unwrap(),
     );
 
-    let url = format!("{}/chat/completions", req.base_url.trim_end_matches('/'));
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
     let body = serde_json::json!({
-        "model": req.model,
+        "model": model,
         "messages": [
-            {"role": "system", "content": req.system},
-            {"role": "user", "content": req.user}
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
         ]
     });
 
@@ -73,12 +222,18 @@ async fn call_openai(req: &LlmRequest) -> Result<String, String> {
         .ok_or_else(|| "No content in response".to_string())
 }
 
-async fn call_anthropic(req: &LlmRequest) -> Result<String, String> {
+async fn call_anthropic(
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+) -> Result<String, String> {
     let client = reqwest::Client::new();
     let mut headers = reqwest::header::HeaderMap::new();
 
-    if !req.api_key.is_empty() {
-        headers.insert("x-api-key", req.api_key.parse().unwrap());
+    if !api_key.is_empty() {
+        headers.insert("x-api-key", api_key.parse().unwrap());
     }
     headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
     headers.insert(
@@ -86,18 +241,15 @@ async fn call_anthropic(req: &LlmRequest) -> Result<String, String> {
         "application/json".parse().unwrap(),
     );
 
-    let base = req
-        .base_url
-        .trim_end_matches('/')
-        .trim_end_matches("/v1");
+    let base = base_url.trim_end_matches('/').trim_end_matches("/v1");
     let url = format!("{}/v1/messages", base);
 
     let body = serde_json::json!({
-        "model": req.model,
+        "model": model,
         "max_tokens": 16384,
-        "system": req.system,
+        "system": system,
         "messages": [
-            {"role": "user", "content": req.user}
+            {"role": "user", "content": user}
         ]
     });
 
@@ -131,11 +283,62 @@ async fn call_anthropic(req: &LlmRequest) -> Result<String, String> {
     Err("No text content block found".to_string())
 }
 
+// === Tauri Commands ===
+
 #[tauri::command]
-async fn call_llm(req: LlmRequest) -> Result<String, String> {
-    match req.protocol.as_str() {
-        "anthropic" => call_anthropic(&req).await,
-        _ => call_openai(&req).await,
+async fn load_settings(app: tauri::AppHandle) -> Result<Settings, String> {
+    Ok(load_settings_from_file(&app))
+}
+
+#[tauri::command]
+async fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), String> {
+    let path = settings_path(&app)?;
+    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn call_llm(app: tauri::AppHandle, req: LlmRequest) -> Result<LlmResult, String> {
+    // Load settings from backend file
+    let settings = load_settings_from_file(&app);
+
+    if settings.api_key.is_empty() && settings.base_url.is_empty() {
+        return Err("Configure settings first".to_string());
+    }
+
+    // Capture and compress DOM
+    let dom = capture_dom(&req.dom);
+
+    // Build user message
+    let user_msg = format!("Current DOM:\n```\n{}\n```\n\nUser instruction: {}", dom, req.instruction);
+
+    // Call LLM API
+    let raw = match settings.protocol.as_str() {
+        "anthropic" => {
+            call_anthropic(&settings.api_key, &settings.base_url, &settings.model, SYSTEM_PROMPT, &user_msg).await?
+        }
+        _ => {
+            call_openai(&settings.api_key, &settings.base_url, &settings.model, SYSTEM_PROMPT, &user_msg).await?
+        }
+    };
+
+    // Extract code from response
+    let code = extract_code(&raw).map(|c| convert_requires(&c));
+
+    Ok(LlmResult { code, raw })
+}
+
+#[tauri::command]
+fn estimate_tokens(dom: String) -> TokenEstimate {
+    let stripped = capture_dom(&dom);
+    let tokens = stripped.len() / 4;
+    let max_tokens = 128000;
+    let percentage = ((tokens as f64) / (max_tokens as f64) * 100.0).min(100.0);
+    TokenEstimate {
+        tokens,
+        max_tokens,
+        percentage,
     }
 }
 
@@ -188,9 +391,7 @@ fn import_app(
     let data: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| format!("Invalid JSON: {}", e))?;
 
-    let versions_val = data
-        .get("versions")
-        .ok_or("Missing 'versions' field")?;
+    let versions_val = data.get("versions").ok_or("Missing 'versions' field")?;
     let versions: Vec<Mutation> =
         serde_json::from_value(versions_val.clone()).map_err(|e| format!("Invalid versions: {}", e))?;
 
@@ -234,13 +435,16 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .manage(Mutex::new(Vec::<Mutation>::new()))
         .invoke_handler(tauri::generate_handler![
+            load_settings,
+            save_settings,
             call_llm,
+            estimate_tokens,
             save_mutation,
             get_mutation_count,
             export_app,
             import_app,
             clear_mutations,
-            get_version
+            get_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
