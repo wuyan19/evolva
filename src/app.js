@@ -382,7 +382,7 @@ document.getElementById('menu-settings').addEventListener('click', function() { 
 document.getElementById('menu-about').addEventListener('click', function() { showAboutDialog(); });
 
 async function showAboutDialog() {
-  var version = await invoke('get_version');
+  var info = await invoke('get_app_info');
   var overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center;';
 
@@ -391,9 +391,9 @@ async function showAboutDialog() {
   dialog.innerHTML =
     '<h3 style="margin:0 0 4px;font-size:16px;color:var(--accent);letter-spacing:2px;">Evolva</h3>' +
     '<p style="margin:0 0 4px;font-size:12px;color:var(--text-muted);">' + t('tagline') + '</p>' +
-    '<p style="margin:0 0 16px;font-size:12px;color:var(--text-muted);">v' + version + '</p>' +
+    '<p style="margin:0 0 16px;font-size:12px;color:var(--text-muted);">v' + info.version + '</p>' +
     '<div style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:18px;">' +
-    '<p style="margin:0 0 4px;font-size:11px;color:var(--text-muted);">Author: Eddie</p>' +
+    '<p style="margin:0 0 4px;font-size:11px;color:var(--text-muted);">Author: ' + info.authors + '</p>' +
     '<p style="margin:0;font-size:11px;color:var(--text-muted);">&copy; 2025 Evolva. All rights reserved.</p>' +
     '</div>' +
     '<button id="about-close" style="background:var(--accent);color:var(--accent-on);border:none;padding:8px 20px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">' + t('ok') + '</button>';

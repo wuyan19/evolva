@@ -439,9 +439,18 @@ fn clear_mutations(state: tauri::State<'_, Mutex<Vec<Mutation>>>) -> Result<(), 
     Ok(())
 }
 
+#[derive(Serialize)]
+struct AppInfo {
+    version: String,
+    authors: String,
+}
+
 #[tauri::command]
-fn get_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+fn get_app_info() -> AppInfo {
+    AppInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        authors: env!("CARGO_PKG_AUTHORS").replace(':', ", "),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -461,7 +470,7 @@ pub fn run() {
             export_app,
             import_app,
             clear_mutations,
-            get_version,
+            get_app_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
