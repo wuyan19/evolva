@@ -114,6 +114,12 @@ fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join("settings.json"))
 }
 
+fn auto_save_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("app.evolva.json"))
+}
+
 fn load_settings_from_file(app: &tauri::AppHandle) -> Settings {
     let path = match settings_path(app) {
         Ok(p) => p,
@@ -439,6 +445,66 @@ fn clear_mutations(state: tauri::State<'_, Mutex<Vec<Mutation>>>) -> Result<(), 
     Ok(())
 }
 
+#[tauri::command]
+fn auto_save(state: tauri::State<'_, Mutex<Vec<Mutation>>>, app: tauri::AppHandle) -> Result<(), String> {
+    let list = state.lock().map_err(|e| e.to_string())?;
+    let path = auto_save_path(&app)?;
+
+    if list.is_empty() {
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+
+    let active_version = list.len() - 1;
+    let data = ExportData {
+        version: 1,
+        name: "app".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        active_version,
+        versions: list.clone(),
+    };
+    let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn auto_load(state: tauri::State<'_, Mutex<Vec<Mutation>>>, app: tauri::AppHandle) -> Result<Option<Vec<String>>, String> {
+    let path = auto_save_path(&app)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let data: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("Invalid JSON: {}", e))?;
+
+    let versions_val = data.get("versions").ok_or("Missing 'versions' field")?;
+    let versions: Vec<Mutation> =
+        serde_json::from_value(versions_val.clone()).map_err(|e| format!("Invalid versions: {}", e))?;
+
+    let active_version = data
+        .get("active_version")
+        .and_then(|v| v.as_u64())
+        .ok_or("Missing 'active_version' field")? as usize;
+
+    if active_version >= versions.len() {
+        return Err("Invalid active_version".to_string());
+    }
+
+    let codes: Vec<String> = versions[..=active_version]
+        .iter()
+        .map(|m| m.code.clone())
+        .collect();
+
+    let mut list = state.lock().map_err(|e| e.to_string())?;
+    *list = versions;
+
+    Ok(Some(codes))
+}
+
 #[derive(Serialize)]
 struct AppInfo {
     version: String,
@@ -470,6 +536,8 @@ pub fn run() {
             export_app,
             import_app,
             clear_mutations,
+            auto_save,
+            auto_load,
             get_app_info,
         ])
         .run(tauri::generate_context!())

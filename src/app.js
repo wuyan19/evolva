@@ -33,7 +33,10 @@ var LANG = {
     logInjectionFailed: 'Injection failed: ',
     logNoCode: 'No JavaScript code block found',
     logMutationApplied: 'Mutation applied.',
-    confirmImport: 'Current session has <strong>{count}</strong> unsaved versions. Import will overwrite. Continue?'
+    confirmImport: 'Current session has <strong>{count}</strong> unsaved versions. Import will overwrite. Continue?',
+    confirmAutoLoad: 'Previous session found (<strong>{count}</strong> versions). Restore?',
+    logAutoLoaded: 'Session restored ({count} versions).',
+    logAutoLoadSkipped: 'Session restore skipped.'
   },
   zh: {
     tagline: '自演化应用',
@@ -66,7 +69,10 @@ var LANG = {
     logInjectionFailed: '注入失败：',
     logNoCode: '未找到 JavaScript 代码块',
     logMutationApplied: '变异已应用。',
-    confirmImport: '当前会话有 <strong>{count}</strong> 个版本未导出，导入将覆盖当前状态。是否继续？'
+    confirmImport: '当前会话有 <strong>{count}</strong> 个版本未导出，导入将覆盖当前状态。是否继续？',
+    confirmAutoLoad: '检测到上次的会话（<strong>{count}</strong> 个版本），是否恢复？',
+    logAutoLoaded: '已恢复会话（{count} 个版本）。',
+    logAutoLoadSkipped: '已跳过会话恢复。'
   }
 };
 
@@ -453,6 +459,7 @@ async function importApp() {
     for (var i = 0; i < codes.length; i++) {
       injectCode(codes[i]);
     }
+    await invoke('auto_save');
     updateContext();
     log('system', t('logImported', { count: codes.length }));
   } catch (err) {
@@ -554,6 +561,7 @@ async function mutate() {
     }
 
     await invoke('save_mutation', { instruction: userMsg, code: result.code });
+    await invoke('auto_save');
     log('system', t('logMutationApplied'));
     promptEl.style.height = 'auto';
     updateContext();
@@ -588,7 +596,47 @@ promptEl.addEventListener('input', function() {
   applyLanguage();
   loadTheme();
   await initMutationSpace();
+
+  // Auto-load: check for previous session
+  try {
+    var result = await invoke('auto_load');
+    if (result && result.length > 0) {
+      var restore = await showRestoreDialog(result.length);
+      if (restore) {
+        for (var i = 0; i < result.length; i++) {
+          injectCode(result[i]);
+        }
+        updateContext();
+        log('system', t('logAutoLoaded', { count: result.length }));
+      } else {
+        log('system', t('logAutoLoadSkipped'));
+      }
+    }
+  } catch (_) {}
+
   updateContext();
   promptEl.focus();
   log('system', t('logInit'));
 })();
+
+// === Restore Dialog ===
+function showRestoreDialog(count) {
+  return new Promise(function(resolve) {
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center;';
+
+    var dialog = document.createElement('div');
+    dialog.style.cssText = 'background:var(--bg-window);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:360px;text-align:center;font-family:inherit;color:var(--text-primary);';
+    dialog.innerHTML = '<p style="margin-bottom:16px;font-size:13px;line-height:1.5;">' + t('confirmAutoLoad', { count: count }) + '</p>' +
+      '<div style="display:flex;gap:10px;justify-content:center;">' +
+      '<button id="restore-cancel" style="background:var(--btn-bg);color:var(--text-primary);border:1px solid var(--btn-border);padding:7px 18px;border-radius:5px;cursor:pointer;font-size:12px;">' + t('cancel') + '</button>' +
+      '<button id="restore-ok" style="background:var(--accent);color:var(--accent-on);border:none;padding:7px 18px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">' + t('ok') + '</button>' +
+      '</div>';
+
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+
+    dialog.querySelector('#restore-ok').addEventListener('click', function() { overlay.remove(); resolve(true); });
+    dialog.querySelector('#restore-cancel').addEventListener('click', function() { overlay.remove(); resolve(false); });
+  });
+}
