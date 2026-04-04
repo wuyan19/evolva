@@ -79,7 +79,6 @@ async fn call_anthropic(req: &LlmRequest) -> Result<String, String> {
     let body = serde_json::json!({
         "model": req.model,
         "max_tokens": 16384,
-        "thinking": {"type": "disabled"},
         "system": req.system,
         "messages": [
             {"role": "user", "content": req.user}
@@ -128,6 +127,8 @@ async fn call_llm(req: LlmRequest) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![call_llm])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

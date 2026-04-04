@@ -161,6 +161,17 @@
       align-self: flex-start;
     }
     #save-settings:hover { opacity: 0.85; }
+    #close-settings {
+      background: var(--btn-bg);
+      color: var(--text-primary);
+      border: 1px solid var(--btn-border);
+      padding: 7px 14px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: background 0.2s;
+    }
+    #close-settings:hover { background: var(--btn-border); }
 
     /* Theme toggle row */
     .theme-row {
@@ -194,12 +205,50 @@
       transform: translateX(20px);
     }
 
-    /* Context Bar */
+    /* Menu Bar */
+    #menu-bar {
+      display: flex;
+      gap: 2px;
+      padding: 4px 14px;
+      background: var(--bg-header);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .menu-btn {
+      background: transparent;
+      color: var(--text-muted);
+      border: none;
+      padding: 4px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      transition: background 0.2s, color 0.2s;
+    }
+    .menu-btn:hover {
+      background: var(--btn-bg);
+      color: var(--text-primary);
+    }
+
+    /* Collapsed state */
+    #evolva-core.collapsed {
+      width: auto !important;
+      height: auto !important;
+    }
+    #evolva-core.collapsed > #settings-panel,
+    #evolva-core.collapsed > #menu-bar,
+    #evolva-core.collapsed > #log,
+    #evolva-core.collapsed > #input-area,
+    #evolva-core.collapsed > #context-bar {
+      display: none !important;
+    }
+
+    /* Context Bar (status bar at bottom) */
     #context-bar {
       position: relative;
       height: 18px;
       background: var(--bg-header);
-      border-bottom: 1px solid var(--border);
+      border-top: 1px solid var(--border);
       flex-shrink: 0;
       overflow: hidden;
       transition: background 0.3s;
@@ -306,30 +355,37 @@
       to { transform: rotate(360deg); }
     }
 
-    /* Settings toggle button */
-    #settings-toggle {
+    /* Collapse toggle button */
+    #collapse-toggle {
       background: var(--btn-bg);
       color: var(--text-primary);
       border: 1px solid var(--btn-border);
-      padding: 4px 12px;
+      padding: 4px 10px;
       border-radius: 5px;
       cursor: pointer;
       font-size: 11px;
       transition: background 0.2s;
+      line-height: 1;
     }
-    #settings-toggle:hover { background: var(--btn-border); }
+    #collapse-toggle:hover { background: var(--btn-border); }
   </style>
 </head>
 <body>
 
   <!-- CORE WINDOW -->
-  <div id="evolva-core" class="evolva-window active">
+  <div id="evolva-core" class="evolva-window active" data-protected>
     <div class="window-header">
       <div>
         <h2>Evolva</h2>
         <p>self-evolving application</p>
       </div>
-      <button id="settings-toggle">settings</button>
+      <button id="collapse-toggle">&#9660;</button>
+    </div>
+
+    <div id="menu-bar">
+      <button class="menu-btn" id="menu-settings">Settings</button>
+      <button class="menu-btn" id="menu-import">Import</button>
+      <button class="menu-btn" id="menu-export">Export</button>
     </div>
 
     <div id="settings-panel">
@@ -348,12 +404,10 @@
         <label>Theme</label>
         <div id="theme-toggle" class="theme-toggle"></div>
       </div>
-      <button id="save-settings">Save</button>
-    </div>
-
-    <div id="context-bar">
-      <div id="context-fill"></div>
-      <span id="context-text">context 0 / 128k (0%)</span>
+      <div style="display:flex;gap:8px">
+        <button id="save-settings">Save</button>
+        <button id="close-settings">Close</button>
+      </div>
     </div>
 
     <div id="log"></div>
@@ -365,6 +419,11 @@
         <span id="send-spinner" style="display:none">&#x27F3;</span>
       </button>
     </div>
+
+    <div id="context-bar">
+      <div id="context-fill"></div>
+      <span id="context-text">context 0 / 128k (0%)</span>
+    </div>
   </div>
 
   <script type="text/plain" id="system-prompt">You are Evolva, a self-evolving application. Your job is to modify the webpage based on user instructions.
@@ -373,7 +432,7 @@ Rules:
 1. Analyze the current DOM structure carefully
 2. Generate ONLY JavaScript code that modifies the DOM
 3. Wrap your code in a ```javascript code block
-4. Do NOT modify or remove the element with id="evolva-core" or any of its children (settings-toggle, settings-panel, context-bar, context-fill, context-text, log, input-area, prompt, send, send-arrow, send-spinner, system-prompt). This is your control panel.
+4. Do NOT modify or remove any element with the attribute `data-protected`, nor any of its children. This is your control panel.
 5. When creating new UI elements, wrap them in a draggable window:
    - Create a div with class="evolva-window" and absolute positioning
    - Add a child div with class="window-header" as the drag handle
@@ -395,13 +454,17 @@ Rules:
 
     // DOM refs
     const coreWindow = document.getElementById('evolva-core');
-    const settingsToggle = document.getElementById('settings-toggle');
+    const collapseToggle = document.getElementById('collapse-toggle');
     const settingsPanel = document.getElementById('settings-panel');
     const apiKeyInput = document.getElementById('api-key');
     const baseUrlInput = document.getElementById('base-url');
     const protocolSelect = document.getElementById('protocol');
     const modelInput = document.getElementById('model');
     const saveSettingsBtn = document.getElementById('save-settings');
+    const menuSettings = document.getElementById('menu-settings');
+    const menuImport = document.getElementById('menu-import');
+    const menuExport = document.getElementById('menu-export');
+    const importFile = document.getElementById('import-file');
     const contextFill = document.getElementById('context-fill');
     const contextText = document.getElementById('context-text');
     const logEl = document.getElementById('log');
@@ -526,13 +589,123 @@ Rules:
       log('system', 'Settings saved.');
     }
 
-    settingsToggle.addEventListener('click', () => {
-      const visible = settingsPanel.style.display !== 'none';
-      settingsPanel.style.display = visible ? 'none' : 'flex';
-      settingsToggle.textContent = visible ? 'settings' : 'close';
+    saveSettingsBtn.addEventListener('click', saveSettings);
+
+    // --- Collapse Toggle ---
+    collapseToggle.addEventListener('click', () => {
+      const isCollapsed = coreWindow.classList.toggle('collapsed');
+      collapseToggle.innerHTML = isCollapsed ? '&#9654;' : '&#9660;';
     });
 
-    saveSettingsBtn.addEventListener('click', saveSettings);
+    // --- Menu Bar ---
+    menuSettings.addEventListener('click', () => {
+      if (coreWindow.classList.contains('collapsed')) return;
+      const visible = settingsPanel.style.display !== 'none';
+      settingsPanel.style.display = visible ? 'none' : 'flex';
+    });
+
+    document.getElementById('close-settings').addEventListener('click', () => {
+      settingsPanel.style.display = 'none';
+    });
+
+    // --- Export / Import ---
+    const { save, open } = window.__TAURI__.dialog;
+    const { writeTextFile, readTextFile } = window.__TAURI__.fs;
+
+    async function exportState() {
+      try {
+        const bodyElements = [];
+        document.body.childNodes.forEach(child => {
+          if (child.nodeType === 1 && child.id !== 'evolva-core' && child.id !== 'import-file') {
+            bodyElements.push(child.outerHTML);
+          }
+        });
+
+        const headStyles = [];
+        const styles = document.head.querySelectorAll('style');
+        styles.forEach((style, i) => {
+          if (i > 0) headStyles.push(style.outerHTML);
+        });
+
+        const data = {
+          bodyElements,
+          headStyles,
+          timestamp: new Date().toISOString()
+        };
+
+        const filePath = await save({
+          defaultPath: 'evolva-state.json',
+          filters: [{ name: 'JSON', extensions: ['json'] }]
+        });
+
+        if (!filePath) return;
+
+        await writeTextFile(filePath, JSON.stringify(data, null, 2));
+        log('system', 'State exported (' + bodyElements.length + ' elements).');
+      } catch (err) {
+        log('error', 'Export failed: ' + err.message);
+      }
+    }
+
+    async function importState() {
+      try {
+        const selected = await open({
+          filters: [{ name: 'JSON', extensions: ['json'] }],
+          multiple: false
+        });
+
+        if (!selected) return;
+        const filePath = selected;
+
+        const content = await readTextFile(filePath);
+        const data = JSON.parse(content);
+
+        // Remove existing non-core body elements
+        const toRemove = [];
+        document.body.childNodes.forEach(child => {
+          if (child.nodeType === 1 && child.id !== 'evolva-core' && child.id !== 'import-file') {
+            toRemove.push(child);
+          }
+        });
+        toRemove.forEach(el => el.remove());
+
+        // Remove extra head styles
+        const headStyles = document.head.querySelectorAll('style');
+        headStyles.forEach((style, i) => {
+          if (i > 0) style.remove();
+        });
+
+        // Restore body elements
+        if (data.bodyElements) {
+          data.bodyElements.forEach(html => {
+            document.body.insertAdjacentHTML('beforeend', html);
+          });
+        }
+
+        // Restore head styles
+        if (data.headStyles) {
+          data.headStyles.forEach(html => {
+            document.head.insertAdjacentHTML('beforeend', html);
+          });
+        }
+
+        // Re-setup draggable on new windows
+        document.querySelectorAll('.evolva-window').forEach(w => {
+          if (w.id !== 'evolva-core') {
+            setupDraggable(w);
+            w.addEventListener('mousedown', () => bringToFront(w));
+          }
+        });
+
+        updateContext();
+        log('system', 'State imported (' + (data.bodyElements ? data.bodyElements.length : 0) + ' elements).');
+      } catch (err) {
+        log('error', 'Import failed: ' + err.message);
+      }
+    }
+
+    menuExport.addEventListener('click', exportState);
+    menuImport.addEventListener('click', importState);
 
     // --- Context Bar ---
     function updateContext() {
@@ -571,8 +744,8 @@ Rules:
     // --- Code Extraction ---
     function extractCode(response) {
       const patterns = [
-        /```(?:javascript|js)\s*\n([\s\S]*?)```/,
-        /~~~(?:javascript|js)\s*\n([\s\S]*?)~~~/,
+        /```(?:javascript|js|jsx|ts|typescript)?\s*\n([\s\S]*?)```/,
+        /~~~(?:javascript|js|jsx|ts|typescript)?\s*\n([\s\S]*?)~~~/,
       ];
       for (const pattern of patterns) {
         const match = response.match(pattern);
