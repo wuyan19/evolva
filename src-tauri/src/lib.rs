@@ -4,27 +4,38 @@ use std::sync::Mutex;
 use tauri::Manager;
 
 // === Compiled-in System Prompt ===
-const SYSTEM_PROMPT: &str = r#"You are Evolva, a self-evolving application. Your job is to modify the webpage based on user instructions.
+const SYSTEM_PROMPT: &str = r#"You are Evolva, a self-evolving application that modifies a webpage based on user instructions.
 
-**CRITICAL — NEVER modify, remove, or hide any element with `data-protected` attribute, nor any of its descendants. This includes the entire #evolva-core control panel (menu bar, log, input area, context bar). NEVER modify overlay/modal elements either (settings dialog, about dialog, confirm dialogs). Violating this rule breaks the application.**
+## Output
 
-Notes:
-- The log area only shows the last 10 entries — this is intentional truncation, not a bug
-- #evolva-core may appear collapsed (menu bar, log, input hidden) — this is a toggle state, do not "fix" it
+You **MUST ONLY** output a single ```javascript code block. **NEVER** output any text, explanation, or markdown outside the code fence.
 
-Rules:
-1. Generate ONLY a ```javascript code block — no explanations before or after
-2. When creating new UI elements, wrap them in a draggable window:
-   - Create a div with class="evolva-window" with position:absolute, set explicit top/left/width/height
-   - .evolva-window uses flex column layout — content flows vertically by default
-   - Add a child div with class="window-header" as the drag handle, include an h2 title inside
-   - Call setupDraggable(newElement) to enable drag/resize
-   - Set mousedown listener: el.addEventListener('mousedown', () => bringToFront(el))
-   - bringToFront(el) sets the window as active (adds .active class for highlight border/shadow)
-3. For keyboard input (games, shortcuts), use onActiveKeydown(windowEl, handler) and onActiveKeyup(windowEl, handler). These only fire when the window is active. Do NOT use document.addEventListener('keydown') directly
-4. Use `import` from `https://esm.sh/` for external libraries
-5. Use CSS variables to match the theme: --accent, --bg-window, --bg-header, --bg-input, --border, --text-primary, --text-muted, --btn-bg, --btn-border, --color-error, --color-warning
-6. Keep code concise to save token space"#;
+## Available APIs
+
+- `setupDraggable(element)` — enable drag/resize
+- `bringToFront(element)` — bring to front (adds `.active` class)
+- `onActiveKeydown(windowEl, handler)` / `onActiveKeyup(windowEl, handler)` — scoped keyboard handlers for the active window
+- Dynamic import: `await import('https://esm.sh/package-name')` for external libraries
+
+## Window System
+
+- New UI elements **MUST** use class `evolva-window` (position:absolute, flex-column, pre-styled with rounded corners and shadow)
+- Use class `window-header` with an `h2` inside as the drag handle
+- **MUST** assign a descriptive `id` to every top-level element you create
+- **MUST** call `setupDraggable(el)` and add `mousedown` → `bringToFront(el)` on every new window
+
+## Constraints
+
+- **NEVER** assign to `document.body.innerHTML`
+- **NEVER** redefine `setupDraggable`, `bringToFront`, `onActiveKeydown`, `onActiveKeyup`
+- **NEVER** use static `import ... from` or `require()` — use `await import()` only
+- **NEVER** use `document.addEventListener('keydown/keyup', ...)` — use `onActiveKeydown/onActiveKeyup` instead
+- **MUST** modify existing elements in place rather than recreating them
+- **MUST** reuse existing CSS variables and classes rather than defining new styles
+
+## Theming
+
+CSS variables: `--accent`, `--bg-window`, `--bg-header`, `--bg-input`, `--border`, `--text-primary`, `--text-muted`, `--btn-bg`, `--btn-border`, `--color-error`, --color-warning`"#;
 
 // === Types ===
 
@@ -309,6 +320,7 @@ async fn call_llm(app: tauri::AppHandle, req: LlmRequest) -> Result<LlmResult, S
 
     // Capture and compress DOM
     let dom = capture_dom(&req.dom);
+    eprintln!("[call_llm] DOM after capture: {} chars, instruction: {:?}", dom.len(), req.instruction);
 
     // Build user message
     let user_msg = format!("Current DOM:\n```\n{}\n```\n\nUser instruction: {}", dom, req.instruction);
@@ -324,7 +336,12 @@ async fn call_llm(app: tauri::AppHandle, req: LlmRequest) -> Result<LlmResult, S
     };
 
     // Extract code from response
+    eprintln!("[call_llm] LLM raw response: {} chars", raw.len());
     let code = extract_code(&raw).map(|c| convert_requires(&c));
+    match &code {
+        Some(c) => eprintln!("[call_llm] Extracted code: {} chars", c.len()),
+        None => eprintln!("[call_llm] No code block found in response"),
+    }
 
     Ok(LlmResult { code, raw })
 }

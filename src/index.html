@@ -66,6 +66,16 @@
       position: relative;
     }
 
+    /* Mutation space iframe — full page behind evolva-core */
+    #mutation-space {
+      position: fixed;
+      inset: 0;
+      border: none;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+    }
+
     /* Window base styles */
     .evolva-window {
       position: absolute;
@@ -370,7 +380,10 @@
 </head>
 <body>
 
-  <!-- CORE WINDOW -->
+  <!-- Mutation space — LLM-generated content lives here (isolated DOM) -->
+  <iframe id="mutation-space"></iframe>
+
+  <!-- CORE WINDOW — control panel on top of iframe -->
   <div id="evolva-core" class="evolva-window active" data-protected>
     <div class="window-header">
       <div>
@@ -413,6 +426,7 @@
     const { invoke } = window.__TAURI__.core;
 
     // DOM refs
+    const mutationFrame = document.getElementById('mutation-space');
     const coreWindow = document.getElementById('evolva-core');
     const collapseToggle = document.getElementById('collapse-toggle');
     const menuSettings = document.getElementById('menu-settings');
@@ -427,37 +441,145 @@
     const sendSpinner = document.getElementById('send-spinner');
 
     let processing = false;
-    let topZ = 100;
+    let mutationSpaceReady = false;
+
+    // --- Mutation Space (iframe initialization) ---
+    function initMutationSpace() {
+      const css = document.head.querySelector('style').textContent;
+      const doc = mutationFrame.contentDocument;
+
+      doc.open();
+      doc.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><style>' + css + '</style></head>' +
+        '<body style="margin:0;padding:0;overflow:hidden;height:100vh;width:100vw;position:relative;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;' +
+        'background:var(--bg-canvas);background-image:radial-gradient(var(--bg-dot) 1px,transparent 1px);background-size:20px 20px;color:var(--text-primary);"></body></html>');
+      doc.close();
+
+      // Load interact.js into iframe
+      var script = doc.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/interactjs/dist/interact.min.js';
+      script.onload = function() {
+        setupMutationHelpers();
+        mutationSpaceReady = true;
+      };
+      doc.head.appendChild(script);
+
+      // Sync initial theme
+      if (document.body.classList.contains('light')) {
+        doc.documentElement.classList.add('light');
+        doc.body.classList.add('light');
+      }
+    }
+
+    function setupMutationHelpers() {
+      var win = mutationFrame.contentWindow;
+      var doc = mutationFrame.contentDocument;
+      var topZ = 100;
+
+      // setupDraggable
+      win.setupDraggable = function(el) {
+        win.interact(el)
+          .draggable({
+            allowFrom: '.window-header',
+            inertia: true,
+            modifiers: [
+              win.interact.modifiers.restrictRect({ restriction: 'parent', endOnly: true })
+            ],
+            listeners: {
+              move: function(event) {
+                var target = event.target;
+                var x = (parseFloat(target.getAttribute('data-x')) || 0) + event.dx;
+                var y = (parseFloat(target.getAttribute('data-y')) || 0) + event.dy;
+                target.style.transform = 'translate(' + x + 'px,' + y + 'px)';
+                target.setAttribute('data-x', x);
+                target.setAttribute('data-y', y);
+              }
+            }
+          })
+          .resizable({
+            edges: { left: false, right: true, bottom: true, top: false },
+            listeners: {
+              move: function(event) {
+                var target = event.target;
+                var x = (parseFloat(target.getAttribute('data-x')) || 0) + event.deltaRect.left;
+                var y = (parseFloat(target.getAttribute('data-y')) || 0) + event.deltaRect.top;
+                target.style.width = event.rect.width + 'px';
+                target.style.height = event.rect.height + 'px';
+                target.style.transform = 'translate(' + x + 'px,' + y + 'px)';
+                target.setAttribute('data-x', x);
+                target.setAttribute('data-y', y);
+              }
+            }
+          });
+      };
+
+      // bringToFront
+      win.bringToFront = function(el) {
+        topZ++;
+        el.style.zIndex = topZ;
+        doc.querySelectorAll('.evolva-window').forEach(function(w) { w.classList.remove('active'); });
+        el.classList.add('active');
+      };
+
+      // Keyboard focus router
+      var keyHandlers = new Map();
+
+      win.onActiveKeydown = function(windowEl, handler) {
+        if (!keyHandlers.has(windowEl)) keyHandlers.set(windowEl, { keydown: [], keyup: [] });
+        keyHandlers.get(windowEl).keydown.push(handler);
+      };
+      win.onActiveKeyup = function(windowEl, handler) {
+        if (!keyHandlers.has(windowEl)) keyHandlers.set(windowEl, { keydown: [], keyup: [] });
+        keyHandlers.get(windowEl).keyup.push(handler);
+      };
+
+      doc.addEventListener('keydown', function(e) {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+        var activeWin = doc.querySelector('.evolva-window.active');
+        if (!activeWin) return;
+        var handlers = keyHandlers.get(activeWin);
+        if (handlers) handlers.keydown.forEach(function(fn) { fn(e); });
+      });
+      doc.addEventListener('keyup', function(e) {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+        var activeWin = doc.querySelector('.evolva-window.active');
+        if (!activeWin) return;
+        var handlers = keyHandlers.get(activeWin);
+        if (handlers) handlers.keyup.forEach(function(fn) { fn(e); });
+      });
+    }
 
     // --- Theme ---
     function applyTheme(light) {
       document.body.classList.toggle('light', light);
       localStorage.setItem('evolva_theme', light ? 'light' : 'dark');
+      // Sync to iframe
+      if (mutationSpaceReady) {
+        var iframeDoc = mutationFrame.contentDocument;
+        iframeDoc.documentElement.classList.toggle('light', light);
+        iframeDoc.body.classList.toggle('light', light);
+      }
     }
 
     function loadTheme() {
-      const saved = localStorage.getItem('evolva_theme');
+      var saved = localStorage.getItem('evolva_theme');
       applyTheme(saved === 'light');
     }
 
-    // --- Drag & Resize (interact.js) ---
+    // --- Drag for evolva-core (main page only) ---
     function setupDraggable(el) {
       interact(el)
         .draggable({
           allowFrom: '.window-header',
           inertia: true,
           modifiers: [
-            interact.modifiers.restrictRect({
-              restriction: 'parent',
-              endOnly: true
-            })
+            interact.modifiers.restrictRect({ restriction: 'parent', endOnly: true })
           ],
           listeners: {
-            move(event) {
+            move: function(event) {
               var target = event.target;
               var x = (parseFloat(target.getAttribute('data-x')) || 0) + event.dx;
               var y = (parseFloat(target.getAttribute('data-y')) || 0) + event.dy;
-              target.style.transform = 'translate(' + x + 'px, ' + y + 'px)';
+              target.style.transform = 'translate(' + x + 'px,' + y + 'px)';
               target.setAttribute('data-x', x);
               target.setAttribute('data-y', y);
             }
@@ -466,13 +588,13 @@
         .resizable({
           edges: { left: false, right: true, bottom: true, top: false },
           listeners: {
-            move(event) {
+            move: function(event) {
               var target = event.target;
               var x = (parseFloat(target.getAttribute('data-x')) || 0) + event.deltaRect.left;
               var y = (parseFloat(target.getAttribute('data-y')) || 0) + event.deltaRect.top;
               target.style.width = event.rect.width + 'px';
               target.style.height = event.rect.height + 'px';
-              target.style.transform = 'translate(' + x + 'px, ' + y + 'px)';
+              target.style.transform = 'translate(' + x + 'px,' + y + 'px)';
               target.setAttribute('data-x', x);
               target.setAttribute('data-y', y);
             }
@@ -480,13 +602,11 @@
         });
     }
 
-    // Bring window to front on click
+    setupDraggable(coreWindow);
+
     function bringToFront(el) {
-      topZ++;
-      el.style.zIndex = topZ;
-      document.querySelectorAll('.evolva-window').forEach(function(w) {
-        w.classList.remove('active');
-      });
+      el.style.zIndex = 100;
+      document.querySelectorAll('.evolva-window').forEach(function(w) { w.classList.remove('active'); });
       el.classList.add('active');
     }
 
@@ -494,61 +614,17 @@
       w.addEventListener('mousedown', function() { bringToFront(w); });
     });
 
-    // Setup core window
-    setupDraggable(coreWindow);
-
-    // Make setupDraggable globally available for LLM-generated code
-    window.setupDraggable = setupDraggable;
-    window.bringToFront = bringToFront;
-
-    // --- Keyboard Focus Router ---
-    const windowKeyHandlers = new Map();
-
-    window.onActiveKeydown = function(windowEl, handler) {
-      if (!windowKeyHandlers.has(windowEl)) {
-        windowKeyHandlers.set(windowEl, { keydown: [], keyup: [] });
-      }
-      windowKeyHandlers.get(windowEl).keydown.push(handler);
-    };
-
-    window.onActiveKeyup = function(windowEl, handler) {
-      if (!windowKeyHandlers.has(windowEl)) {
-        windowKeyHandlers.set(windowEl, { keydown: [], keyup: [] });
-      }
-      windowKeyHandlers.get(windowEl).keyup.push(handler);
-    };
-
-    document.addEventListener('keydown', function(e) {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-      const activeWin = document.querySelector('.evolva-window.active');
-      if (!activeWin) return;
-      const handlers = windowKeyHandlers.get(activeWin);
-      if (handlers) {
-        handlers.keydown.forEach(function(fn) { fn(e); });
-      }
-    });
-
-    document.addEventListener('keyup', function(e) {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-      const activeWin = document.querySelector('.evolva-window.active');
-      if (!activeWin) return;
-      const handlers = windowKeyHandlers.get(activeWin);
-      if (handlers) {
-        handlers.keyup.forEach(function(fn) { fn(e); });
-      }
-    });
-
     // --- Log ---
     function log(actor, message) {
-      const entry = document.createElement('div');
+      var entry = document.createElement('div');
       entry.className = 'log-entry';
-      const time = document.createElement('span');
+      var time = document.createElement('span');
       time.className = 'log-time';
       time.textContent = new Date().toLocaleTimeString();
-      const actorEl = document.createElement('span');
+      var actorEl = document.createElement('span');
       actorEl.className = 'log-actor ' + actor;
       actorEl.textContent = actor;
-      const msg = document.createElement('span');
+      var msg = document.createElement('span');
       msg.textContent = message;
       entry.appendChild(time);
       entry.appendChild(actorEl);
@@ -559,18 +635,18 @@
 
     // --- Settings (backend-managed) ---
     async function showSettingsDialog() {
-      let settings;
+      var settings;
       try {
         settings = await invoke('load_settings');
       } catch (err) {
         settings = { api_key: '', base_url: '', model: '', protocol: 'openai' };
       }
 
-      const overlay = document.createElement('div');
+      var overlay = document.createElement('div');
       overlay.className = 'settings-overlay';
-      const dlg = document.createElement('div');
+      var dlg = document.createElement('div');
       dlg.className = 'settings-dialog';
-      const isLight = document.body.classList.contains('light');
+      var isLight = document.body.classList.contains('light');
       dlg.innerHTML =
         '<h3>Settings</h3>' +
         '<label>API Key</label>' +
@@ -590,20 +666,18 @@
       overlay.appendChild(dlg);
       document.body.appendChild(overlay);
 
-      // Populate current values from backend
       dlg.querySelector('#dlg-api-key').value = settings.api_key || '';
       dlg.querySelector('#dlg-base-url').value = settings.base_url || '';
       dlg.querySelector('#dlg-model').value = settings.model || '';
       dlg.querySelector('#dlg-protocol').value = settings.protocol || 'openai';
 
-      // Theme toggle inside dialog
       dlg.querySelector('#dlg-theme').addEventListener('click', function() {
-        const nowLight = !document.body.classList.contains('light');
+        var nowLight = !document.body.classList.contains('light');
         applyTheme(nowLight);
         this.classList.toggle('light', nowLight);
       });
 
-      dlg.querySelector('#dlg-save').addEventListener('click', async () => {
+      dlg.querySelector('#dlg-save').addEventListener('click', async function() {
         try {
           await invoke('save_settings', {
             settings: {
@@ -620,31 +694,27 @@
         }
       });
 
-      dlg.querySelector('#dlg-cancel').addEventListener('click', () => overlay.remove());
+      dlg.querySelector('#dlg-cancel').addEventListener('click', function() { overlay.remove(); });
     }
 
     // --- Collapse Toggle ---
-    collapseToggle.addEventListener('click', () => {
-      const isCollapsed = coreWindow.classList.toggle('collapsed');
+    collapseToggle.addEventListener('click', function() {
+      var isCollapsed = coreWindow.classList.toggle('collapsed');
       collapseToggle.innerHTML = isCollapsed ? '&#9654;' : '&#9660;';
     });
 
     // --- Menu Bar ---
-    menuSettings.addEventListener('click', () => {
-      showSettingsDialog();
-    });
+    menuSettings.addEventListener('click', function() { showSettingsDialog(); });
 
     // --- About ---
-    document.getElementById('menu-about').addEventListener('click', () => {
-      showAboutDialog();
-    });
+    document.getElementById('menu-about').addEventListener('click', function() { showAboutDialog(); });
 
     async function showAboutDialog() {
-      const version = await invoke('get_version');
-      const overlay = document.createElement('div');
+      var version = await invoke('get_version');
+      var overlay = document.createElement('div');
       overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center;';
 
-      const dialog = document.createElement('div');
+      var dialog = document.createElement('div');
       dialog.style.cssText = 'background:var(--bg-window);border:1px solid var(--border);border-radius:10px;padding:24px 28px;max-width:320px;text-align:center;font-family:inherit;color:var(--text-primary);';
       dialog.innerHTML =
         '<h3 style="margin:0 0 4px;font-size:16px;color:var(--accent);letter-spacing:1px;">Evolva</h3>' +
@@ -655,30 +725,30 @@
       overlay.appendChild(dialog);
       document.body.appendChild(overlay);
 
-      dialog.querySelector('#about-close').addEventListener('click', () => overlay.remove());
-      overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+      dialog.querySelector('#about-close').addEventListener('click', function() { overlay.remove(); });
+      overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
     }
 
     // --- Export / Import ---
-    const { save, open } = window.__TAURI__.dialog;
+    var tauriDialog = window.__TAURI__.dialog;
 
     async function exportApp() {
       try {
-        const count = await invoke('get_mutation_count');
+        var count = await invoke('get_mutation_count');
         if (count === 0) {
           log('error', 'No mutations to export');
           return;
         }
 
-        const filePath = await save({
+        var filePath = await tauriDialog.save({
           defaultPath: 'app.evolva.json',
           filters: [{ name: 'Evolva JSON', extensions: ['json'] }]
         });
 
         if (!filePath) return;
 
-        const name = filePath.split(/[\\/]/).pop().replace('.evolva.json', '').replace('.json', '');
-        await invoke('export_app', { path: filePath, name });
+        var name = filePath.split(/[\\/]/).pop().replace('.evolva.json', '').replace('.json', '');
+        await invoke('export_app', { path: filePath, name: name });
         log('system', 'App exported (' + count + ' versions).');
       } catch (err) {
         log('error', 'Export failed: ' + String(err));
@@ -687,39 +757,34 @@
 
     async function importApp() {
       try {
-        const count = await invoke('get_mutation_count');
+        var count = await invoke('get_mutation_count');
         if (count > 0) {
-          const confirmed = await showConfirmDialog(count);
+          var confirmed = await showConfirmDialog(count);
           if (!confirmed) return;
         }
 
-        const selected = await open({
+        var selected = await tauriDialog.open({
           filters: [{ name: 'Evolva JSON', extensions: ['json'] }],
           multiple: false
         });
 
         if (!selected) return;
 
-        const codes = await invoke('import_app', { path: selected });
+        var codes = await invoke('import_app', { path: selected });
 
-        // Clear non-core DOM elements
-        const toRemove = [];
-        document.body.childNodes.forEach(child => {
-          if (child.nodeType === 1 && child.id !== 'evolva-core') {
-            toRemove.push(child);
-          }
-        });
-        toRemove.forEach(el => el.remove());
-
+        // Clear iframe mutation space
+        var iframeDoc = mutationFrame.contentDocument;
+        while (iframeDoc.body.firstChild) iframeDoc.body.removeChild(iframeDoc.body.firstChild);
         // Remove extra head styles (keep first)
-        const headStyles = document.head.querySelectorAll('style');
-        headStyles.forEach((style, i) => {
-          if (i > 0) style.remove();
-        });
+        var headStyles = iframeDoc.head.querySelectorAll('style');
+        headStyles.forEach(function(style, i) { if (i > 0) style.remove(); });
+
+        // Re-init helpers
+        setupMutationHelpers();
 
         // Replay all versions in order
-        for (const code of codes) {
-          injectCode(code);
+        for (var i = 0; i < codes.length; i++) {
+          injectCode(codes[i]);
         }
         updateContext();
         log('system', 'App imported (' + codes.length + ' versions replayed).');
@@ -730,12 +795,12 @@
 
     // --- Confirm Dialog ---
     function showConfirmDialog(count) {
-      return new Promise((resolve) => {
-        const overlay = document.createElement('div');
+      return new Promise(function(resolve) {
+        var overlay = document.createElement('div');
         overlay.id = 'confirm-overlay';
         overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center;';
 
-        const dialog = document.createElement('div');
+        var dialog = document.createElement('div');
         dialog.style.cssText = 'background:var(--bg-window);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:360px;text-align:center;font-family:inherit;color:var(--text-primary);';
         dialog.innerHTML = '<p style="margin-bottom:16px;font-size:13px;line-height:1.5;">当前会话有 <strong>' + count + '</strong> 个版本未导出，导入将覆盖当前状态。是否继续？</p>' +
           '<div style="display:flex;gap:10px;justify-content:center;">' +
@@ -746,48 +811,42 @@
         overlay.appendChild(dialog);
         document.body.appendChild(overlay);
 
-        dialog.querySelector('#confirm-ok').addEventListener('click', () => {
-          overlay.remove();
-          resolve(true);
-        });
-        dialog.querySelector('#confirm-cancel').addEventListener('click', () => {
-          overlay.remove();
-          resolve(false);
-        });
+        dialog.querySelector('#confirm-ok').addEventListener('click', function() { overlay.remove(); resolve(true); });
+        dialog.querySelector('#confirm-cancel').addEventListener('click', function() { overlay.remove(); resolve(false); });
       });
     }
 
     menuExport.addEventListener('click', exportApp);
     menuImport.addEventListener('click', importApp);
 
-    // --- Context Bar (backend token estimation) ---
+    // --- Context Bar (reads iframe DOM) ---
     async function updateContext() {
       try {
-        const est = await invoke('estimate_tokens', { dom: document.documentElement.outerHTML });
+        var dom = mutationFrame.contentDocument.documentElement.outerHTML;
+        var est = await invoke('estimate_tokens', { dom: dom });
         contextFill.style.width = est.percentage + '%';
-        const maxK = Math.round(est.max_tokens / 1000);
+        var maxK = Math.round(est.max_tokens / 1000);
         contextText.textContent = 'context ' + est.tokens + ' / ' + maxK + 'k (' + est.percentage.toFixed(1) + '%)';
         contextFill.classList.remove('warning', 'danger');
         if (est.percentage > 96) contextFill.classList.add('danger');
         else if (est.percentage > 72) contextFill.classList.add('warning');
-      } catch (_) {
-        // silently ignore
-      }
+      } catch (_) {}
     }
 
-    // --- Script Injection (simplified — no require conversion) ---
+    // --- Script Injection (into iframe) ---
     function injectCode(code) {
-      const script = document.createElement('script');
+      var iframeDoc = mutationFrame.contentDocument;
+      var script = iframeDoc.createElement('script');
       script.textContent = '(async () => {\n' + code + '\n})();';
-      document.body.appendChild(script);
+      iframeDoc.body.appendChild(script);
       script.remove();
     }
 
     // --- Mutation Loop ---
     async function mutate() {
-      if (processing) return;
+      if (processing || !mutationSpaceReady) return;
 
-      const userMsg = promptEl.value.trim();
+      var userMsg = promptEl.value.trim();
       if (!userMsg) return;
 
       processing = true;
@@ -800,23 +859,30 @@
       try {
         log('user', userMsg);
 
-        // Truncate log entries to last 10 (DOM manipulation must happen in frontend)
-        while (logEl.children.length > 10) {
-          logEl.removeChild(logEl.children[0]);
-        }
+        var dom = mutationFrame.contentDocument.documentElement.outerHTML;
+        log('system', 'DOM captured (' + Math.round(dom.length / 4) + ' tokens, ' + dom.length + ' chars)');
 
-        // Send raw DOM to backend — backend handles capture, system prompt, code extraction, require conversion
-        const result = await invoke('call_llm', {
-          req: { dom: document.documentElement.outerHTML, instruction: userMsg },
+        var result = await invoke('call_llm', {
+          req: { dom: dom, instruction: userMsg },
         });
+
+        log('system', 'LLM responded (' + result.raw.length + ' chars, code: ' + (result.code ? result.code.length + ' chars' : 'none') + ')');
 
         if (!result.code) {
           log('error', 'No JavaScript code block found');
-          console.log('LLM response:', result.raw);
+          console.log('LLM raw response:', result.raw);
           return;
         }
 
-        injectCode(result.code);
+        try {
+          injectCode(result.code);
+          log('system', 'Code injected into iframe.');
+        } catch (injectErr) {
+          log('error', 'Injection failed: ' + String(injectErr));
+          console.log('Failed code:', result.code);
+          return;
+        }
+
         await invoke('save_mutation', { instruction: userMsg, code: result.code });
         log('system', 'Mutation applied.');
         promptEl.style.height = 'auto';
@@ -835,21 +901,23 @@
     // --- Event Handlers ---
     sendBtn.addEventListener('click', mutate);
 
-    promptEl.addEventListener('keydown', (e) => {
+    promptEl.addEventListener('keydown', function(e) {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         mutate();
       }
     });
 
-    promptEl.addEventListener('input', () => {
+    promptEl.addEventListener('input', function() {
       promptEl.style.height = 'auto';
       promptEl.style.height = Math.min(promptEl.scrollHeight, 140) + 'px';
     });
 
     // --- Init ---
     loadTheme();
+    initMutationSpace();
     updateContext();
+    promptEl.focus();
     log('system', 'Evolva initialized. Configure settings to begin.');
   </script>
 </body>
