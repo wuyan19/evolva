@@ -45,7 +45,7 @@
 
 ```bash
 # 克隆仓库
-git clone <repo-url>
+git clone https://github.com/wuyan19/evolva.git
 cd evolva
 
 # 安装前端依赖

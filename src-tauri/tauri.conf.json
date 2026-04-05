@@ -37,7 +37,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE0MDkxQjk2NDVFNkY3MzMKUldRejkrWkZsaHNKRlBQY2oxSHk1clYyUjRJeFZOd2F4NG1EZ2VFUWtpYjlYWlhsRjFJUVJnMDYK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlFRkYwMUE5Qzk0RTRBQkQKUldTOVNrN0pxUUgvbnQ3YmZadlhBZW5KcXRpN0NDUndWaU0xRVBlOEhHQ2YxSnNHQ3F5QkMzWVIK",
       "endpoints": [
         "https://github.com/wuyan19/evolva/releases/latest/download/latest.json"
       ]
