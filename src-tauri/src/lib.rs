@@ -13,10 +13,14 @@ You **MUST ONLY** output a single ```javascript code block. **NEVER** output any
 
 ## Available APIs
 
-- `setupDraggable(element)` — enable drag/resize
-- `bringToFront(element)` — bring to front (adds `.active` class)
+- `setupDraggable(element)` — enable drag/resize on a window element
+- `bringToFront(element)` — bring a window to front (adds `.active` class)
 - `onActiveKeydown(windowEl, handler)` / `onActiveKeyup(windowEl, handler)` — scoped keyboard handlers for the active window
-- Dynamic import: `await import('https://esm.sh/package-name')` for external libraries
+- `await evolva.import('package-name')` — dynamic import of npm packages (e.g. `await evolva.import('chart.js')`). **Use this instead of `import()` or `require()`**
+- `await evolva.readFile(path)` — read a file from disk
+- `await evolva.writeFile(path, content)` — write a file to disk
+- `await evolva.store(key)` / `await evolva.store(key, value)` / `await evolva.store(key, null)` — read / write / delete persistent key-value pair
+- `await evolva.clipboardRead()` / `await evolva.clipboardWrite(text)` — read / write clipboard
 
 ## Window System
 
@@ -29,7 +33,7 @@ You **MUST ONLY** output a single ```javascript code block. **NEVER** output any
 
 - **NEVER** assign to `document.body.innerHTML`
 - **NEVER** redefine `setupDraggable`, `bringToFront`, `onActiveKeydown`, `onActiveKeyup`
-- **NEVER** use static `import ... from` or `require()` — use `await import()` only
+- **NEVER** use `import()` or `require()` — use `await evolva.import()` instead
 - **NEVER** use `document.addEventListener('keydown/keyup', ...)` — use `onActiveKeydown/onActiveKeyup` instead
 - **MUST** modify existing elements in place rather than recreating them
 - **MUST** reuse existing CSS variables and classes rather than defining new styles
@@ -54,6 +58,37 @@ struct Settings {
     theme: String,
     #[serde(default)]
     language: String,
+    #[serde(default)]
+    permissions: Option<PermissionsConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PermissionsConfig {
+    #[serde(default)]
+    network: bool,
+    #[serde(default)]
+    fs_read: bool,
+    #[serde(default)]
+    fs_write: bool,
+    #[serde(default)]
+    tauri_api: bool,
+    #[serde(default)]
+    storage: bool,
+    #[serde(default)]
+    clipboard: bool,
+}
+
+impl Default for PermissionsConfig {
+    fn default() -> Self {
+        PermissionsConfig {
+            network: false,
+            fs_read: false,
+            fs_write: false,
+            tauri_api: false,
+            storage: false,
+            clipboard: false,
+        }
+    }
 }
 
 fn default_base_url() -> String {
@@ -75,6 +110,7 @@ impl Default for Settings {
             protocol: default_protocol(),
             theme: String::new(),
             language: String::new(),
+            permissions: None,
         }
     }
 }
@@ -176,20 +212,6 @@ fn extract_code(response: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Convert require('pkg') to esm.sh dynamic imports
-fn convert_requires(code: &str) -> String {
-    // (const|let|var) x = require('pkg') → const x = (await import("https://esm.sh/pkg"))
-    let re1 = Regex::new(r#"(?:const|let|var)\s+(\w+)\s*=\s*require\(['"]([\w@/.\\-]+)['"]\)"#).unwrap();
-    let step1 = re1
-        .replace_all(code, r#"const $1 = (await import("https://esm.sh/$2"))"#)
-        .to_string();
-
-    // require('pkg') → (await import("https://esm.sh/pkg"))
-    let re2 = Regex::new(r#"require\(['"]([\w@/.\\-]+)['"]\)"#).unwrap();
-    re2.replace_all(&step1, r#"(await import("https://esm.sh/$1"))"#)
-        .to_string()
 }
 
 // === LLM API Calls ===
@@ -351,7 +373,7 @@ async fn call_llm(app: tauri::AppHandle, req: LlmRequest) -> Result<LlmResult, S
 
     // Extract code from response
     eprintln!("[call_llm] LLM raw response: {} chars", raw.len());
-    let code = extract_code(&raw).map(|c| convert_requires(&c));
+    let code = extract_code(&raw);
     match &code {
         Some(c) => eprintln!("[call_llm] Extracted code: {} chars", c.len()),
         None => eprintln!("[call_llm] No code block found in response"),
@@ -603,6 +625,140 @@ fn get_app_info() -> AppInfo {
     }
 }
 
+// === Sandbox Proxy Commands ===
+
+/// 沙盒文件读取代理
+#[tauri::command]
+fn sandbox_read_file(path: String) -> Result<String, String> {
+    // 安全检查：只允许读取文件，不允许路径遍历
+    let p = std::path::Path::new(&path);
+    if path.is_empty() {
+        return Err("Path is empty".to_string());
+    }
+    std::fs::read_to_string(p).map_err(|e| e.to_string())
+}
+
+/// 沙盒文件写入代理
+#[tauri::command]
+fn sandbox_write_file(path: String, content: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if path.is_empty() {
+        return Err("Path is empty".to_string());
+    }
+    // 确保父目录存在
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(p, content).map_err(|e| e.to_string())
+}
+
+/// 沙盒存储：读取
+#[tauri::command]
+fn sandbox_store_get(app: tauri::AppHandle, tab_id: String, key: String) -> Result<Option<String>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let safe_id = tab_id.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "_");
+    let store_path = dir.join(format!("sandbox_store_{}.json", safe_id));
+    if !store_path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&store_path).map_err(|e| e.to_string())?;
+    let map: std::collections::HashMap<String, String> =
+        serde_json::from_str(&content).unwrap_or_default();
+    Ok(map.get(&key).cloned())
+}
+
+/// 沙盒存储：写入/删除
+#[tauri::command]
+fn sandbox_store_set(
+    app: tauri::AppHandle,
+    tab_id: String,
+    key: String,
+    value: Option<String>,
+) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let safe_id = tab_id.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "_");
+    let store_path = dir.join(format!("sandbox_store_{}.json", safe_id));
+
+    let mut map: std::collections::HashMap<String, String> = if store_path.exists() {
+        let content = std::fs::read_to_string(&store_path).unwrap_or_default();
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    if let Some(v) = value {
+        map.insert(key, v);
+    } else {
+        map.remove(&key);
+    }
+
+    let json = serde_json::to_string(&map).map_err(|e| e.to_string())?;
+    std::fs::write(&store_path, json).map_err(|e| e.to_string())
+}
+
+/// 沙盒网络请求代理：通过 Rust 后端发起 HTTP 请求，绕过浏览器 CORS
+#[derive(Serialize)]
+struct ProxyResponse {
+    ok: bool,
+    status: u16,
+    status_text: String,
+    headers: std::collections::HashMap<String, String>,
+    body: String,
+    url: String,
+}
+
+#[tauri::command]
+async fn sandbox_proxy_fetch(
+    url: String,
+    method: String,
+    headers: std::collections::HashMap<String, String>,
+    body: Option<String>,
+) -> Result<ProxyResponse, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut req_builder = client.request(
+        reqwest::Method::from_bytes(method.to_uppercase().as_bytes()).unwrap_or(reqwest::Method::GET),
+        &url,
+    );
+
+    for (key, value) in &headers {
+        if let Ok(v) = value.parse::<reqwest::header::HeaderValue>() {
+            req_builder = req_builder.header(key.as_str(), v);
+        }
+    }
+
+    if let Some(b) = body {
+        req_builder = req_builder.body(b);
+    }
+
+    let resp = req_builder.send().await.map_err(|e| format!("Request failed: {}", e))?;
+
+    let status = resp.status().as_u16();
+    let ok = resp.status().is_success();
+    let status_text = resp.status().canonical_reason().unwrap_or("").to_string();
+    let resp_url = resp.url().to_string();
+
+    let mut resp_headers = std::collections::HashMap::new();
+    for (key, value) in resp.headers() {
+        resp_headers.insert(key.to_string(), value.to_str().unwrap_or("").to_string());
+    }
+
+    let resp_body = resp.text().await.map_err(|e| e.to_string())?;
+
+    Ok(ProxyResponse {
+        ok,
+        status,
+        status_text,
+        headers: resp_headers,
+        body: resp_body,
+        url: resp_url,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -625,6 +781,11 @@ pub fn run() {
             list_saved_tabs,
             delete_tab_save,
             get_app_info,
+            sandbox_read_file,
+            sandbox_write_file,
+            sandbox_store_get,
+            sandbox_store_set,
+            sandbox_proxy_fetch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

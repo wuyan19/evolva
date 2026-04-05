@@ -43,7 +43,16 @@ var LANG = {
     logTabCreated: 'New tab created.',
     logTabClosed: 'Tab closed.',
     confirmRestoreAll: 'Found <strong>{count}</strong> tabs from previous session. Restore all?',
-    maxTabsReached: 'Maximum {max} tabs reached.'
+    maxTabsReached: 'Maximum {max} tabs reached.',
+    sandboxPermissions: 'Sandbox Permissions',
+    permNetwork: 'Network Access',
+    permFsRead: 'File Read',
+    permFsWrite: 'File Write',
+    permTauriApi: 'Tauri API',
+    permStorage: 'Persistent Storage',
+    permClipboard: 'Clipboard',
+    settingsBasic: 'General',
+    settingsSecurity: 'Security'
   },
   zh: {
     tagline: '自演化应用',
@@ -86,7 +95,16 @@ var LANG = {
     logTabCreated: '已创建新标签页。',
     logTabClosed: '已关闭标签页。',
     confirmRestoreAll: '检测到上次会话的 <strong>{count}</strong> 个标签页。是否全部恢复？',
-    maxTabsReached: '已达到最大标签页数量 {max}。'
+    maxTabsReached: '已达到最大标签页数量 {max}。',
+    sandboxPermissions: '沙盒权限',
+    permNetwork: '网络访问',
+    permFsRead: '文件读取',
+    permFsWrite: '文件写入',
+    permTauriApi: 'Tauri API',
+    permStorage: '持久存储',
+    permClipboard: '剪贴板',
+    settingsBasic: '基础设置',
+    settingsSecurity: '安全设置'
   }
 };
 
@@ -114,6 +132,8 @@ var tabCounter = 0;
 var tabs = {};
 var activeTabId = null;
 var cachedCssText = null;
+var cachedInteractText = null;
+var cachedSandboxText = null;
 
 function TabState(id, name) {
   this.id = id;
@@ -152,6 +172,7 @@ async function createTab(name) {
   // 创建 iframe
   var iframe = document.createElement('iframe');
   iframe.className = 'mutation-space';
+  iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
   iframe.style.display = 'none';
   document.body.appendChild(iframe);
   state.iframe = iframe;
@@ -280,6 +301,7 @@ function updateTabBarUI() {
           if (val) {
             tabs[tid].name = val;
             ns.textContent = val;
+            invoke('auto_save', { tabId: tid, tabName: val });
           }
           input.remove();
           ns.style.display = '';
@@ -371,22 +393,34 @@ async function initMutationSpaceForTab(state) {
   if (!cachedCssText) {
     cachedCssText = await fetch('style.css').then(function(r) { return r.text(); });
   }
+  // 预加载 sandbox.js 和 interact.js
+  if (!cachedSandboxText) {
+    cachedSandboxText = await fetch('sandbox.js').then(function(r) { return r.text(); });
+  }
+  if (!cachedInteractText) {
+    cachedInteractText = await fetch('https://cdn.jsdelivr.net/npm/interactjs/dist/interact.min.js')
+      .then(function(r) { return r.text(); });
+  }
+
+  // 安全处理：防止 </script 截断 HTML 解析
+  function safeScript(text) {
+    return text.replace(/<\/script/gi, '<\\/script');
+  }
 
   var doc = state.iframe.contentDocument;
   doc.open();
-  doc.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><style>' + cachedCssText + '</style></head>' +
+  doc.write('<!DOCTYPE html><html><head><meta charset="UTF-8">' +
+    '<style>' + cachedCssText + '</style>' +
+    '<script>' + safeScript(cachedSandboxText) + '<\/script>' +
+    '<script>' + safeScript(cachedInteractText) + '<\/script>' +
+    '</head>' +
     '<body style="margin:0;padding:0;overflow:hidden;height:100vh;width:100vw;position:relative;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;' +
     'background:var(--bg-canvas);background-image:radial-gradient(var(--bg-dot) 1px,transparent 1px);background-size:20px 20px;color:var(--text-primary);"></body></html>');
   doc.close();
 
-  // 用 blob URL 加载 interact.js 避免重复网络请求
-  var script = doc.createElement('script');
-  script.src = 'https://cdn.jsdelivr.net/npm/interactjs/dist/interact.min.js';
-  script.onload = function() {
-    setupMutationHelpers(state);
-    state.mutationSpaceReady = true;
-  };
-  doc.head.appendChild(script);
+  // 设置 mutation helpers
+  setupMutationHelpers(state);
+  state.mutationSpaceReady = true;
 
   // 同步主题
   if (document.body.classList.contains('light')) {
@@ -577,17 +611,33 @@ function buildSettingsDialog(state, settings) {
   var isLight = document.body.classList.contains('light');
   dlg.innerHTML =
     '<h3>' + t('settings') + '</h3>' +
-    '<label>' + t('apiKey') + '</label>' +
-    '<div style="position:relative"><input type="password" id="dlg-api-key" placeholder="sk-..." style="width:100%;padding-right:32px"><span id="dlg-key-toggle" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;opacity:0.5;font-size:13px;user-select:none">&#128065;</span></div>' +
-    '<label>' + t('baseUrl') + '</label>' +
-    '<input type="text" id="dlg-base-url" placeholder="https://api.openai.com/v1">' +
-    '<label>' + t('protocol') + '</label>' +
-    '<select id="dlg-protocol"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select>' +
-    '<label>' + t('model') + '</label>' +
-    '<input type="text" id="dlg-model" placeholder="gpt-4o">' +
-    '<label>' + t('language') + '</label>' +
-    '<select id="dlg-lang"><option value="zh">中文</option><option value="en">English</option></select>' +
-    '<div class="theme-row"><label>' + t('theme') + '</label><div id="dlg-theme" class="theme-toggle' + (isLight ? ' light' : '') + '"></div></div>' +
+    '<div class="settings-tabs">' +
+      '<button class="settings-tab active" data-tab="basic">' + t('settingsBasic') + '</button>' +
+      '<button class="settings-tab" data-tab="security">' + t('settingsSecurity') + '</button>' +
+    '</div>' +
+    '<div class="settings-panel" id="panel-basic">' +
+      '<label>' + t('apiKey') + '</label>' +
+      '<div style="position:relative"><input type="password" id="dlg-api-key" placeholder="sk-..." style="width:100%;padding-right:32px"><span id="dlg-key-toggle" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;opacity:0.5;font-size:13px;user-select:none">&#128065;</span></div>' +
+      '<label>' + t('baseUrl') + '</label>' +
+      '<input type="text" id="dlg-base-url" placeholder="https://api.openai.com/v1">' +
+      '<label>' + t('protocol') + '</label>' +
+      '<select id="dlg-protocol"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select>' +
+      '<label>' + t('model') + '</label>' +
+      '<input type="text" id="dlg-model" placeholder="gpt-4o">' +
+      '<label>' + t('language') + '</label>' +
+      '<select id="dlg-lang"><option value="zh">中文</option><option value="en">English</option></select>' +
+      '<div class="theme-row"><label>' + t('theme') + '</label><div id="dlg-theme" class="theme-toggle' + (isLight ? ' light' : '') + '"></div></div>' +
+    '</div>' +
+    '<div class="settings-panel" id="panel-security" style="display:none">' +
+      '<div class="permissions-section">' +
+        '<h4>' + t('sandboxPermissions') + '</h4>' +
+        '<div class="permission-row"><span>' + t('permNetwork') + '</span><div id="perm-network" class="permission-toggle' + (settings.permissions && settings.permissions.network ? ' on' : '') + '"></div></div>' +
+        '<div class="permission-row"><span>' + t('permFsRead') + '</span><div id="perm-fs-read" class="permission-toggle' + (settings.permissions && settings.permissions.fs_read ? ' on' : '') + '"></div></div>' +
+        '<div class="permission-row"><span>' + t('permFsWrite') + '</span><div id="perm-fs-write" class="permission-toggle' + (settings.permissions && settings.permissions.fs_write ? ' on' : '') + '"></div></div>' +
+        '<div class="permission-row"><span>' + t('permStorage') + '</span><div id="perm-storage" class="permission-toggle' + (settings.permissions && settings.permissions.storage ? ' on' : '') + '"></div></div>' +
+        '<div class="permission-row"><span>' + t('permClipboard') + '</span><div id="perm-clipboard" class="permission-toggle' + (settings.permissions && settings.permissions.clipboard ? ' on' : '') + '"></div></div>' +
+      '</div>' +
+    '</div>' +
     '<div style="display:flex;gap:8px;margin-top:4px">' +
     '<button id="dlg-save" style="background:var(--accent);color:var(--accent-on);border:none;padding:7px 14px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">' + t('save') + '</button>' +
     '<button id="dlg-cancel" style="background:var(--btn-bg);color:var(--text-primary);border:1px solid var(--btn-border);padding:7px 14px;border-radius:5px;cursor:pointer;font-size:12px;">' + t('cancel') + '</button>' +
@@ -602,10 +652,30 @@ function buildSettingsDialog(state, settings) {
   dlg.querySelector('#dlg-protocol').value = settings.protocol || 'openai';
   dlg.querySelector('#dlg-lang').value = currentLang;
 
+  // 标签页切换
+  dlg.querySelectorAll('.settings-tab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      dlg.querySelectorAll('.settings-tab').forEach(function(t) { t.classList.remove('active'); });
+      this.classList.add('active');
+      var target = this.getAttribute('data-tab');
+      dlg.querySelector('#panel-basic').style.display = target === 'basic' ? '' : 'none';
+      dlg.querySelector('#panel-security').style.display = target === 'security' ? '' : 'none';
+    });
+  });
+
   dlg.querySelector('#dlg-theme').addEventListener('click', function() {
     var nowLight = !document.body.classList.contains('light');
     applyTheme(nowLight);
     this.classList.toggle('light', nowLight);
+  });
+
+  // 权限 toggle 开关事件
+  var permKeys = ['network', 'fs-read', 'fs-write', 'tauri-api', 'storage', 'clipboard'];
+  permKeys.forEach(function(key) {
+    var toggle = dlg.querySelector('#perm-' + key);
+    if (toggle) {
+      toggle.addEventListener('click', function() { this.classList.toggle('on'); });
+    }
   });
 
   dlg.querySelector('#dlg-lang').addEventListener('change', function() {
@@ -631,8 +701,18 @@ function buildSettingsDialog(state, settings) {
           protocol: dlg.querySelector('#dlg-protocol').value,
           theme: document.body.classList.contains('light') ? 'light' : 'dark',
           language: currentLang,
+          permissions: {
+            network: !!dlg.querySelector('#perm-network').classList.contains('on'),
+            fs_read: !!dlg.querySelector('#perm-fs-read').classList.contains('on'),
+            fs_write: !!dlg.querySelector('#perm-fs-write').classList.contains('on'),
+            storage: !!dlg.querySelector('#perm-storage').classList.contains('on'),
+            clipboard: !!dlg.querySelector('#perm-clipboard').classList.contains('on'),
+          }
         }
       });
+      // 重新加载权限并广播到所有 iframe
+      await loadPermissions();
+      broadcastPermissions();
       log(state, 'system', t('logSettingsSaved'));
       overlay.remove();
     } catch (err) {
@@ -761,11 +841,218 @@ async function updateContext(state) {
   } catch (_) {}
 }
 
+// === Sandbox Permission Management ===
+
+var activePermissions = { network: false, fs_read: false, fs_write: false, storage: false, clipboard: false };
+
+function defaultPermissions() {
+  return { network: false, fs_read: false, fs_write: false, storage: false, clipboard: false };
+}
+
+async function loadPermissions() {
+  try {
+    var settings = await invoke('load_settings');
+    if (settings.permissions) {
+      activePermissions = settings.permissions;
+    } else {
+      activePermissions = defaultPermissions();
+    }
+  } catch (_) {
+    activePermissions = defaultPermissions();
+  }
+}
+
+function broadcastPermissions() {
+  for (var tabId in tabs) {
+    var win = tabs[tabId].iframe.contentWindow;
+    if (win) {
+      win.postMessage({ type: 'evolva-permissions', permissions: activePermissions }, '*');
+    }
+  }
+}
+
+// === Sandbox postMessage Handler ===
+
+function sandboxSendResponse(source, id, success, data, error) {
+  source.postMessage({
+    type: 'evolva-response',
+    id: id,
+    success: success,
+    data: data || null,
+    error: error || null
+  }, '*');
+}
+
+function handleSandboxFetch(source, id, payload) {
+  console.log('[sandbox] fetch request:', payload.url, 'network permission:', activePermissions.network);
+  if (!activePermissions.network) {
+    sandboxSendResponse(source, id, false, null, 'Permission denied: network');
+    return;
+  }
+  // 通过 Rust 后端代理请求，绕过浏览器 CORS
+  invoke('sandbox_proxy_fetch', {
+    url: payload.url,
+    method: payload.method || 'GET',
+    headers: payload.headers || {},
+    body: payload.body || null
+  }).then(function (data) {
+    console.log('[sandbox] fetch success:', data.status, data.body ? data.body.length : 0, 'chars');
+    sandboxSendResponse(source, id, true, data);
+  }).catch(function (err) {
+    console.log('[sandbox] fetch error:', String(err));
+    sandboxSendResponse(source, id, false, null, String(err));
+  });
+}
+
+function handleSandboxImport(source, id, payload) {
+  if (!activePermissions.network) {
+    sandboxSendResponse(source, id, false, null, 'Permission denied: network');
+    return;
+  }
+  var moduleName = payload.module;
+  var url = 'https://esm.sh/' + moduleName + '?bundle';
+  // 通过 Rust 后端下载模块源码，绕过 CORS
+  invoke('sandbox_proxy_fetch', {
+    url: url,
+    method: 'GET',
+    headers: {},
+    body: null
+  }).then(function (data) {
+    if (!data.ok) throw new Error('Module not found: ' + moduleName);
+    sandboxSendResponse(source, id, true, { source: data.body });
+  }).catch(function (err) {
+    sandboxSendResponse(source, id, false, null, String(err));
+  });
+}
+
+function handleSandboxInvoke(source, id, payload) {
+  // 白名单过滤：只允许安全的命令（无需额外权限开关，白名单本身就是安全边界）
+  var allowedCommands = {
+    'get_app_info': true,
+    'estimate_tokens': true,
+    'sandbox_read_file': true,
+    'sandbox_write_file': true,
+    'sandbox_proxy_fetch': true,
+    'sandbox_store_get': true,
+    'sandbox_store_set': true
+  };
+  var cmd = payload.command;
+  if (!allowedCommands[cmd]) {
+    sandboxSendResponse(source, id, false, null, 'Command not allowed: ' + cmd);
+    return;
+  }
+  invoke(cmd, payload.args).then(function (result) {
+    sandboxSendResponse(source, id, true, result);
+  }).catch(function (err) {
+    sandboxSendResponse(source, id, false, null, String(err));
+  });
+}
+
+function handleSandboxFsRead(source, id, payload) {
+  if (!activePermissions.fs_read) {
+    sandboxSendResponse(source, id, false, null, 'Permission denied: fs-read');
+    return;
+  }
+  invoke('sandbox_read_file', { path: payload.path }).then(function (result) {
+    sandboxSendResponse(source, id, true, result);
+  }).catch(function (err) {
+    sandboxSendResponse(source, id, false, null, String(err));
+  });
+}
+
+function handleSandboxFsWrite(source, id, payload) {
+  if (!activePermissions.fs_write) {
+    sandboxSendResponse(source, id, false, null, 'Permission denied: fs-write');
+    return;
+  }
+  invoke('sandbox_write_file', { path: payload.path, content: payload.content }).then(function () {
+    sandboxSendResponse(source, id, true, null);
+  }).catch(function (err) {
+    sandboxSendResponse(source, id, false, null, String(err));
+  });
+}
+
+function handleSandboxStorage(source, id, payload) {
+  if (!activePermissions.storage) {
+    sandboxSendResponse(source, id, false, null, 'Permission denied: storage');
+    return;
+  }
+  var tabId = activeTabId;
+  if (payload.action === 'get') {
+    invoke('sandbox_store_get', { tabId: tabId, key: payload.key }).then(function (result) {
+      sandboxSendResponse(source, id, true, result);
+    }).catch(function (err) {
+      sandboxSendResponse(source, id, false, null, String(err));
+    });
+  } else if (payload.action === 'set') {
+    invoke('sandbox_store_set', { tabId: tabId, key: payload.key, value: payload.value }).then(function () {
+      sandboxSendResponse(source, id, true, null);
+    }).catch(function (err) {
+      sandboxSendResponse(source, id, false, null, String(err));
+    });
+  } else if (payload.action === 'delete') {
+    invoke('sandbox_store_set', { tabId: tabId, key: payload.key, value: null }).then(function () {
+      sandboxSendResponse(source, id, true, null);
+    }).catch(function (err) {
+      sandboxSendResponse(source, id, false, null, String(err));
+    });
+  }
+}
+
+function handleSandboxClipboard(source, id, payload) {
+  if (!activePermissions.clipboard) {
+    sandboxSendResponse(source, id, false, null, 'Permission denied: clipboard');
+    return;
+  }
+  if (payload.action === 'read') {
+    navigator.clipboard.readText().then(function (text) {
+      sandboxSendResponse(source, id, true, text);
+    }).catch(function (err) {
+      sandboxSendResponse(source, id, false, null, String(err));
+    });
+  } else if (payload.action === 'write') {
+    navigator.clipboard.writeText(payload.text).then(function () {
+      sandboxSendResponse(source, id, true, null);
+    }).catch(function (err) {
+      sandboxSendResponse(source, id, false, null, String(err));
+    });
+  }
+}
+
+// parent 端 postMessage 监听
+window.addEventListener('message', function (event) {
+  var data = event.data;
+  if (!data || data.type !== 'evolva-request') return;
+
+  var source = event.source;
+  var id = data.id;
+  var channel = data.channel;
+  var payload = data.payload;
+
+  switch (channel) {
+    case 'fetch': handleSandboxFetch(source, id, payload); break;
+    case 'import': handleSandboxImport(source, id, payload); break;
+    case 'invoke': handleSandboxInvoke(source, id, payload); break;
+    case 'fs-read': handleSandboxFsRead(source, id, payload); break;
+    case 'fs-write': handleSandboxFsWrite(source, id, payload); break;
+    case 'storage': handleSandboxStorage(source, id, payload); break;
+    case 'clipboard': handleSandboxClipboard(source, id, payload); break;
+    default:
+      sandboxSendResponse(source, id, false, null, 'Unknown channel: ' + channel);
+  }
+});
+
 // === Script Injection ===
 function injectCode(state, code) {
+  // 文本替换：仅替换 import() 和 require()，它们无法在运行时拦截
+  // fetch() 由 sandbox.js 透明代理，无需替换
+  var safeCode = code
+    .replace(/(?<!\.)\bimport\s*\(/g, 'evolva.import(')
+    .replace(/(?<!\.)\brequire\s*\(/g, 'evolva.import(');
+
   var iframeDoc = state.iframe.contentDocument;
   var script = iframeDoc.createElement('script');
-  script.textContent = '(async () => {\n' + code + '\n})();';
+  script.textContent = '(async () => {\n' + safeCode + '\n})();';
   iframeDoc.body.appendChild(script);
   script.remove();
 }
@@ -894,6 +1181,9 @@ document.getElementById('tab-about').addEventListener('click', showAboutDialog);
       applyTheme(savedSettings.theme === 'light');
     }
   } catch (_) {}
+
+  // 加载沙盒权限配置
+  await loadPermissions();
 
   applyLanguage();
 
