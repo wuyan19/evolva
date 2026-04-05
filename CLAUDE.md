@@ -20,22 +20,23 @@ npm run tauri dev        # 等效于 cargo tauri dev
 - **前端**：`src/` 目录下多文件应用（HTML + CSS + JS），无构建步骤
   - `index.html` — 页面结构
   - `style.css` — 样式与主题变量
-  - `app.js` — 逻辑、i18n、iframe 管理
+  - `app.js` — 逻辑、i18n、iframe 管理、沙盒权限代理
+  - `sandbox.js` — iframe 沙盒拦截层（fetch/import/文件/存储/剪贴板代理）
 - **后端**：`src-tauri/src/lib.rs` — Rust 实现 LLM 调用、Settings 持久化、DOM 压缩、代码提取
 - **通信**：Tauri Command 模式，前端通过 `window.__TAURI__.core.invoke()` 调用后端
 
 ### iframe 隔离架构
 
 控制面板（evolva-core）与 LLM 变异空间（mutation-space iframe）完全隔离：
-- **前端负责**：UI 渲染、iframe 初始化（加载 CSS/interact.js/辅助函数）、主题与语言同步、代码注入
-- **后端负责**：Settings 持久化、System Prompt（编译进二进制）、DOM 压缩、代码提取、require→esm.sh 转换、Token 估算
+- **前端负责**：UI 渲染、iframe 初始化（加载 CSS/interact.js/sandbox.js/辅助函数）、主题与语言同步、代码注入、沙盒权限代理
+- **后端负责**：Settings 持久化、System Prompt（编译进二进制）、DOM 压缩、代码提取、Token 估算、沙盒代理命令（文件读写/网络/存储）
 
 ### 自修改引擎
 
 1. 前端读取 iframe DOM + 用户指令，发送到后端
 2. 后端压缩 DOM、拼接编译常量 System Prompt、调用 LLM API
-3. 后端从响应提取代码、转换 require 为 esm.sh 动态 import
-4. 前端将代码注入 iframe 执行
+3. 后端从响应提取代码
+4. 前端转换 `require()`/`import()` 为 `evolva.import()`，将代码注入 iframe 执行
 
 ### 关键设计决策
 
@@ -47,7 +48,7 @@ npm run tauri dev        # 等效于 cargo tauri dev
 | Rust 代理 LLM 调用 | 绕过 CORS |
 | Settings 后端持久化 | API Key 不暴露给前端注入的 JS |
 | System Prompt 编译进二进制 | 不占用 DOM 空间，减少发给 LLM 的上下文 |
-| i18n 前端翻译表 | 支持中英文切换，语言设置保存在 localStorage |
+| i18n 前端翻译表 | 支持中英文切换，语言设置保存在后端配置文件 |
 
 ## 关键文件
 
@@ -55,8 +56,9 @@ npm run tauri dev        # 等效于 cargo tauri dev
 |------|------|
 | `src/index.html` | 页面 HTML 结构 |
 | `src/style.css` | 样式、主题变量、窗口样式 |
-| `src/app.js` | 前端逻辑、i18n、iframe 管理 |
-| `src-tauri/src/lib.rs` | Rust 后端，LLM API 代理、Settings |
+| `src/app.js` | 前端逻辑、i18n、iframe 管理、沙盒权限代理 |
+| `src/sandbox.js` | iframe 沙盒拦截层，代理 fetch/import/文件/存储/剪贴板 |
+| `src-tauri/src/lib.rs` | Rust 后端，LLM API 代理、沙盒命令、Settings |
 | `src-tauri/tauri.conf.json` | Tauri 应用配置 |
 | `src-tauri/Cargo.toml` | Rust 依赖管理 |
 

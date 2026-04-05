@@ -4,6 +4,10 @@
 
 基于 [Tauri v2](https://v2.tauri.app/) 构建，前端使用纯 HTML/CSS/JS，后端使用 Rust。
 
+![Evolva 截图](ScreenShot.png)
+
+> **灵感来源**：本项目灵感来自 [Ouroboros](https://ki-seki.github.io/features/ouroboros/landing.html)——一个基于浏览器的自修改网页实验。Evolva 将这一理念延伸至桌面端，通过 Tauri + Rust 实现更安全的能力隔离与更丰富的沙盒权限控制。
+
 ## 工作原理
 
 ```
@@ -15,14 +19,15 @@
 1. **DOM 捕获** — 剥离 `<script>` 标签，压缩空白，减少上下文占用
 2. **LLM 代理** — Rust 后端转发请求至 OpenAI / Anthropic API，绕过 webview CORS 限制
 3. **代码提取** — 从 LLM 返回的 markdown 代码块中解析 JavaScript
-4. **动态注入** — 将 `require()` 转换为 esm.sh 动态 import，以 async IIFE 注入执行
-5. **iframe 隔离** — LLM 生成的代码在独立 iframe 中执行，无法触及控制面板
+4. **沙盒隔离** — iframe 内运行 sandbox.js 拦截层，代理 fetch/import/文件/存储/剪贴板等 API，权限可配置
+5. **动态注入** — 将 `require()`/`import()` 转换为 `evolva.import()` 代理，以 async IIFE 注入执行
 
 ## 功能特性
 
 - **多标签页** — 每个标签页拥有独立的变异空间（iframe）、控制面板和操作历史，互不干扰
 - **自然语言驱动** — 用中文或英文描述 UI 改动，LLM 生成代码并即时生效
 - **多协议支持** — 兼容 OpenAI 和 Anthropic 两种 API 协议
+- **沙盒权限控制** — 独立控制网络访问、文件读写、持久存储、剪贴板等权限
 - **上下文监控** — 每个标签页实时显示 token 用量和上下文窗口占用比例
 - **会话持久化** — 自动保存每个标签页的变异历史，重启后可恢复
 - **暗/亮主题** — 一键切换，主题和语言设置持久化到配置文件
@@ -92,10 +97,11 @@ evolva/
 ├── src/
 │   ├── index.html            # 页面结构
 │   ├── style.css             # 样式与主题
-│   └── app.js                # 前端逻辑（TabState、i18n、标签管理）
+│   ├── app.js                # 前端逻辑（TabState、i18n、标签管理、权限代理）
+│   └── sandbox.js            # iframe 沙盒拦截层（fetch/import/存储/剪贴板代理）
 ├── src-tauri/
 │   ├── src/
-│   │   ├── lib.rs            # Rust 后端（LLM API 代理、状态管理、持久化）
+│   │   ├── lib.rs            # Rust 后端（LLM API 代理、沙盒命令、状态管理、持久化）
 │   │   └── main.rs           # 入口点
 │   ├── Cargo.toml            # Rust 依赖配置
 │   └── tauri.conf.json       # Tauri 应用配置
