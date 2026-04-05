@@ -52,7 +52,17 @@ var LANG = {
     permStorage: 'Persistent Storage',
     permClipboard: 'Clipboard',
     settingsBasic: 'General',
-    settingsSecurity: 'Security'
+    settingsSecurity: 'Security',
+    checkUpdate: 'Check for Updates',
+    checking: 'Checking...',
+    newVersion: 'New version {version} available',
+    upToDate: 'You\'re up to date',
+    checkFailed: 'Update check failed',
+    downloading: 'Downloading... {percent}%',
+    downloadComplete: 'Download complete, restarting...',
+    downloadAndRestart: 'Download & Restart',
+    goToDownload: 'Go to Download',
+    updateFailed: 'Update failed, opening download page...'
   },
   zh: {
     tagline: '自演化应用',
@@ -104,7 +114,17 @@ var LANG = {
     permStorage: '持久存储',
     permClipboard: '剪贴板',
     settingsBasic: '基础设置',
-    settingsSecurity: '安全设置'
+    settingsSecurity: '安全设置',
+    checkUpdate: '检查更新',
+    checking: '检查中...',
+    newVersion: '发现新版本 {version}',
+    upToDate: '已是最新版本',
+    checkFailed: '检查更新失败',
+    downloading: '下载中... {percent}%',
+    downloadComplete: '下载完成，即将重启...',
+    downloadAndRestart: '下载并重启',
+    goToDownload: '前往下载',
+    updateFailed: '更新失败，正在打开下载页面...'
   }
 };
 
@@ -724,13 +744,23 @@ function buildSettingsDialog(state, settings) {
 }
 
 // === About Dialog ===
+var updateStatus = 'idle'; // idle | checking | upToDate | available | downloading | downloadComplete | failed
+var updateVersion = '';
+var updatePercent = 0;
+var updateError = '';
+
 async function showAboutDialog() {
   var info = await invoke('get_app_info');
+  updateStatus = 'idle';
+  updateVersion = '';
+  updatePercent = 0;
+  updateError = '';
+
   var overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center;';
 
   var dialog = document.createElement('div');
-  dialog.style.cssText = 'background:var(--bg-window);border:1px solid var(--border);border-radius:10px;padding:24px 28px;min-width:280px;text-align:center;font-family:inherit;color:var(--text-primary);';
+  dialog.style.cssText = 'background:var(--bg-window);border:1px solid var(--border);border-radius:10px;padding:24px 28px;min-width:300px;text-align:center;font-family:inherit;color:var(--text-primary);';
   dialog.innerHTML =
     '<h3 style="margin:0 0 4px;font-size:16px;color:var(--accent);letter-spacing:2px;">Evolva</h3>' +
     '<p style="margin:0 0 4px;font-size:12px;color:var(--text-muted);">' + t('tagline') + '</p>' +
@@ -739,11 +769,112 @@ async function showAboutDialog() {
     '<p style="margin:0 0 4px;font-size:11px;color:var(--text-muted);">Author: ' + info.authors + '</p>' +
     '<p style="margin:0;font-size:11px;color:var(--text-muted);">&copy; 2025 Evolva. All rights reserved.</p>' +
     '</div>' +
+    '<div id="update-section" style="border-top:1px solid var(--border);padding-top:12px;margin-bottom:12px;"></div>' +
     '<button id="about-close" style="background:var(--accent);color:var(--accent-on);border:none;padding:8px 20px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">' + t('ok') + '</button>';
 
   overlay.appendChild(dialog);
   document.body.appendChild(overlay);
 
+  function renderUpdateUI() {
+    var section = dialog.querySelector('#update-section');
+    if (!section) return;
+    var html = '';
+    switch (updateStatus) {
+      case 'idle':
+        html = '<button id="btn-check-update" style="background:var(--btn-bg);color:var(--text-primary);border:1px solid var(--btn-border);padding:6px 16px;border-radius:5px;cursor:pointer;font-size:12px;">' + t('checkUpdate') + '</button>';
+        break;
+      case 'checking':
+        html = '<p style="font-size:12px;color:var(--text-muted);">' + t('checking') + '</p>';
+        break;
+      case 'upToDate':
+        html = '<p style="font-size:12px;color:var(--text-muted);">' + t('upToDate') + '</p>';
+        break;
+      case 'available':
+        html = '<p style="font-size:12px;margin-bottom:8px;">' + t('newVersion', { version: updateVersion }) + '</p>' +
+          '<div style="display:flex;gap:8px;justify-content:center;">' +
+          '<button id="btn-download-update" style="background:var(--accent);color:var(--accent-on);border:none;padding:6px 14px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">' + t('downloadAndRestart') + '</button>' +
+          '<button id="btn-go-download" style="background:var(--btn-bg);color:var(--text-primary);border:1px solid var(--btn-border);padding:6px 14px;border-radius:5px;cursor:pointer;font-size:12px;">' + t('goToDownload') + '</button>' +
+          '</div>';
+        break;
+      case 'downloading':
+        html = '<div style="background:var(--btn-bg);border-radius:4px;height:6px;margin-bottom:6px;overflow:hidden;">' +
+          '<div style="background:var(--accent);height:100%;width:' + updatePercent + '%;transition:width 0.3s;"></div></div>' +
+          '<p style="font-size:12px;color:var(--text-muted);">' + t('downloading', { percent: updatePercent }) + '</p>';
+        break;
+      case 'downloadComplete':
+        html = '<p style="font-size:12px;color:var(--text-muted);">' + t('downloadComplete') + '</p>';
+        break;
+      case 'failed':
+        html = '<p style="font-size:12px;color:var(--color-error);">' + updateError + '</p>';
+        break;
+    }
+    section.innerHTML = html;
+
+    // 绑定按钮事件
+    var checkBtn = dialog.querySelector('#btn-check-update');
+    if (checkBtn) checkBtn.addEventListener('click', handleCheckUpdate);
+    var downloadBtn = dialog.querySelector('#btn-download-update');
+    if (downloadBtn) downloadBtn.addEventListener('click', handleDownloadAndInstall);
+    var goBtn = dialog.querySelector('#btn-go-download');
+    if (goBtn) goBtn.addEventListener('click', function() { invoke('open_github'); });
+  }
+
+  async function handleCheckUpdate() {
+    updateStatus = 'checking';
+    renderUpdateUI();
+    try {
+      var updater = window.__TAURI__.updater;
+      var update = await updater.check();
+      if (update) {
+        updateStatus = 'available';
+        updateVersion = update.version;
+      } else {
+        updateStatus = 'upToDate';
+      }
+    } catch (e) {
+      updateStatus = 'failed';
+      updateError = t('checkFailed');
+    }
+    renderUpdateUI();
+  }
+
+  async function handleDownloadAndInstall() {
+    try {
+      var updater = window.__TAURI__.updater;
+      var update = await updater.check();
+      if (!update) return;
+
+      var downloaded = 0;
+      var contentLength = 0;
+      await update.downloadAndInstall(function(event) {
+        switch (event.event) {
+          case 'Started':
+            contentLength = event.data.contentLength || 0;
+            break;
+          case 'Progress':
+            downloaded += event.data.chunkLength;
+            if (contentLength > 0) {
+              updatePercent = Math.round((downloaded / contentLength) * 100);
+              updateStatus = 'downloading';
+              renderUpdateUI();
+            }
+            break;
+          case 'Finished':
+            updateStatus = 'downloadComplete';
+            renderUpdateUI();
+            break;
+        }
+      });
+      await window.__TAURI__.process.relaunch();
+    } catch (e) {
+      updateStatus = 'failed';
+      updateError = t('updateFailed');
+      renderUpdateUI();
+      invoke('open_github');
+    }
+  }
+
+  renderUpdateUI();
   dialog.querySelector('#about-close').addEventListener('click', function() { overlay.remove(); });
   overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
 }

@@ -4,6 +4,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::Manager;
 
+#[cfg(desktop)]
+use tauri_plugin_opener::OpenerExt;
+
 // === Compiled-in System Prompt ===
 const SYSTEM_PROMPT: &str = r#"You are Evolva, a self-evolving application that modifies a webpage based on user instructions.
 
@@ -625,6 +628,14 @@ fn get_app_info() -> AppInfo {
     }
 }
 
+/// 打开 GitHub Releases 页面（更新失败时的回退方案）
+#[tauri::command]
+async fn open_github(app: tauri::AppHandle) -> Result<(), String> {
+    app.opener()
+        .open_url("https://github.com/wuyan19/evolva/releases", None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 // === Sandbox Proxy Commands ===
 
 /// 沙盒文件读取代理
@@ -765,6 +776,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Mutex::new(HashMap::<String, Vec<Mutation>>::new()))
         .invoke_handler(tauri::generate_handler![
             load_settings,
@@ -786,6 +799,7 @@ pub fn run() {
             sandbox_store_get,
             sandbox_store_set,
             sandbox_proxy_fetch,
+            open_github,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
