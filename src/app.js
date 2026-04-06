@@ -425,7 +425,9 @@ function createCoreElement(state) {
 
   // 窗口控制按钮
   core.querySelector('.window-ctrl-minimize').addEventListener('click', function() {
-    core.classList.toggle('collapsed');
+    core.style.display = 'none';
+    state.coreHidden = true;
+    addCoreToDock(state);
   });
   core.querySelector('.window-ctrl-maximize').addEventListener('click', function() {
     if (core.classList.contains('maximized')) {
@@ -563,10 +565,11 @@ function setupMutationHelpers(state) {
     controls.appendChild(closeBtn);
     header.appendChild(controls);
 
-    // 最小化/还原（收缩为仅 header，仍可拖拽）
+    // 最小化 → 隐藏窗口并添加到 Dock 栏
     minBtn.addEventListener('click', function(e) {
       e.stopPropagation();
-      el.classList.toggle('minimized');
+      el.style.display = 'none';
+      addWindowToDock(el);
     });
 
     // 最大化/还原
