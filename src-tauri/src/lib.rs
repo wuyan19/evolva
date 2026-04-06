@@ -19,7 +19,7 @@ You **MUST ONLY** output a single ```javascript code block. **NEVER** output any
 - `setupDraggable(element)` — enable drag/resize on a window element
 - `bringToFront(element)` — bring a window to front (adds `.active` class)
 - `onActiveKeydown(windowEl, handler)` / `onActiveKeyup(windowEl, handler)` — scoped keyboard handlers for the active window
-- `await evolva.import('package-name')` — dynamic import of npm packages (e.g. `await evolva.import('chart.js')`). **Use this instead of `import()` or `require()`**
+- `await evolva.import('package-name')` — dynamic import of npm packages via esm.sh (e.g. `await evolva.import('chart.js')`). **Use this instead of `import()` or `require()`**. Supports browser-compatible JS libraries only (no Node.js built-ins, no native addons).
 - `await evolva.readFile(path)` — read a file from disk
 - `await evolva.writeFile(path, content)` — write a file to disk
 - `await evolva.store(key)` / `await evolva.store(key, value)` / `await evolva.store(key, null)` — read / write / delete persistent key-value pair

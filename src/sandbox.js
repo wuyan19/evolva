@@ -164,21 +164,46 @@
   // --- 显式 API：evolva.* ---
 
   var moduleCache = {};
+  var importCallbacks = {};
+
+  // 模块加载完成回调（由 <script type="module"> 调用）
+  window.__evolva_import_done = function (moduleName) {
+    var mod = (window.__evolva_modules && window.__evolva_modules[moduleName]) || {};
+    moduleCache[moduleName] = mod;
+    var cb = importCallbacks[moduleName];
+    if (cb) {
+      delete importCallbacks[moduleName];
+      cb.resolve(mod);
+    }
+  };
 
   window.evolva = {
-    // 模块导入（import() 语法无法覆盖，必须显式调用）
+    // 模块导入：通过父页面代理下载 ESM 源码，用 <script type="module"> 原生加载
     import: function (moduleName) {
       if (moduleCache[moduleName]) return Promise.resolve(moduleCache[moduleName]);
-      return sendRequest('import', { module: moduleName }).then(function (data) {
-        var blob = new Blob([data.source], { type: 'application/javascript' });
-        var url = URL.createObjectURL(blob);
-        return import(url).then(function (mod) {
-          URL.revokeObjectURL(url);
-          moduleCache[moduleName] = mod;
-          return mod;
+      return new Promise(function (resolve, reject) {
+        importCallbacks[moduleName] = { resolve: resolve, reject: reject };
+        sendRequest('import', { module: moduleName }).then(function (data) {
+          // 将源码中的相对路径 import 改写为 esm.sh 绝对路径
+          var source = data.source
+            .replace(/(from\s+["'])\/([^"']+)(["'])/g, '$1https://esm.sh/$2$3')
+            .replace(/(import\s+["'])\/([^"']+)(["'])/g, '$1https://esm.sh/$2$3');
+          var blob = new Blob([source], { type: 'text/javascript' });
+          var blobUrl = URL.createObjectURL(blob);
+          var safeName = moduleName.replace(/'/g, "\\'").replace(/"/g, '\\"');
+          var script = document.createElement('script');
+          script.type = 'module';
+          script.textContent =
+            'import * as __mod from "' + blobUrl + '";' +
+            'window.__evolva_modules = window.__evolva_modules || {};' +
+            'window.__evolva_modules["' + safeName + '"] = __mod;' +
+            'window.__evolva_import_done("' + safeName + '");' +
+            'URL.revokeObjectURL("' + blobUrl + '");';
+          document.head.appendChild(script);
+          script.remove();
         }).catch(function (err) {
-          URL.revokeObjectURL(url);
-          throw err;
+          delete importCallbacks[moduleName];
+          reject(err);
         });
       });
     },
