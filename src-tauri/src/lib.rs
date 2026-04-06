@@ -125,13 +125,22 @@ struct Mutation {
     code: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct ExportData {
     version: u32,
     name: String,
     created_at: String,
     active_version: usize,
     versions: Vec<Mutation>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    states: Option<serde_json::Value>,
+}
+
+/// import_app / auto_load 的返回类型
+#[derive(Serialize)]
+struct LoadResult {
+    codes: Vec<String>,
+    states: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -427,6 +436,7 @@ fn export_app(
     path: String,
     name: String,
     tab_id: String,
+    window_states: Option<serde_json::Value>,
 ) -> Result<(), String> {
     let map = state.lock().map_err(|e| e.to_string())?;
     let list = map.get(&tab_id).ok_or("Tab not found".to_string())?;
@@ -440,6 +450,7 @@ fn export_app(
         created_at: chrono::Utc::now().to_rfc3339(),
         active_version,
         versions: list.clone(),
+        states: window_states,
     };
     let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
@@ -451,7 +462,7 @@ fn import_app(
     state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
     path: String,
     tab_id: String,
-) -> Result<Vec<String>, String> {
+) -> Result<LoadResult, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let data: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| format!("Invalid JSON: {}", e))?;
@@ -474,10 +485,12 @@ fn import_app(
         .map(|m| m.code.clone())
         .collect();
 
+    let states = data.get("states").cloned();
+
     let mut map = state.lock().map_err(|e| e.to_string())?;
     map.insert(tab_id, versions);
 
-    Ok(codes)
+    Ok(LoadResult { codes, states })
 }
 
 #[tauri::command]
@@ -496,6 +509,7 @@ fn auto_save(
     app: tauri::AppHandle,
     tab_id: String,
     tab_name: String,
+    window_states: Option<serde_json::Value>,
 ) -> Result<(), String> {
     let map = state.lock().map_err(|e| e.to_string())?;
     let path = auto_save_path(&app, &tab_id)?;
@@ -524,6 +538,7 @@ fn auto_save(
         created_at: chrono::Utc::now().to_rfc3339(),
         active_version,
         versions: list.clone(),
+        states: window_states,
     };
     let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
@@ -535,7 +550,7 @@ fn auto_load(
     state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
     app: tauri::AppHandle,
     tab_id: String,
-) -> Result<Option<Vec<String>>, String> {
+) -> Result<Option<LoadResult>, String> {
     let path = auto_save_path(&app, &tab_id)?;
     if !path.exists() {
         return Ok(None);
@@ -563,10 +578,12 @@ fn auto_load(
         .map(|m| m.code.clone())
         .collect();
 
+    let states = data.get("states").cloned();
+
     let mut map = state.lock().map_err(|e| e.to_string())?;
     map.insert(tab_id, versions);
 
-    Ok(Some(codes))
+    Ok(Some(LoadResult { codes, states }))
 }
 
 // === Tab Save Management ===

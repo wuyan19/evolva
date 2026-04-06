@@ -242,6 +242,7 @@ function switchTab(tabId) {
   activeTabId = tabId;
 
   updateTabBarUI();
+  rebuildDock();
 }
 
 async function closeTab(tabId) {
@@ -321,7 +322,8 @@ function updateTabBarUI() {
           if (val) {
             tabs[tid].name = val;
             ns.textContent = val;
-            invoke('auto_save', { tabId: tid, tabName: val });
+            var st = tabs[tid];
+            invoke('auto_save', { tabId: tid, tabName: val, windowStates: captureWindowStates(st) });
           }
           input.remove();
           ns.style.display = '';
@@ -371,6 +373,31 @@ function addCoreToDock(state) {
     updateMainDockVisibility();
   });
   dock.appendChild(item);
+  updateMainDockVisibility();
+}
+
+// 切换标签页时重建 Dock（仅显示当前标签页的窗口）
+function rebuildDock() {
+  var dock = document.getElementById('main-dock');
+  if (dock) dock.innerHTML = '';
+  var state = getActiveState();
+  if (!state) { updateMainDockVisibility(); return; }
+  // iframe 中隐藏的窗口
+  if (state.mutationSpaceReady && state.iframe.contentWindow && state.iframe.contentWindow.addWindowToDock) {
+    var iframeDoc = state.iframe.contentDocument;
+    if (iframeDoc) {
+      var windows = iframeDoc.querySelectorAll('.evolva-window');
+      for (var i = 0; i < windows.length; i++) {
+        if (windows[i].style.display === 'none') {
+          state.iframe.contentWindow.addWindowToDock(windows[i]);
+        }
+      }
+    }
+  }
+  // 主控面板隐藏
+  if (state.coreHidden) {
+    addCoreToDock(state);
+  }
   updateMainDockVisibility();
 }
 
@@ -643,6 +670,7 @@ function setupMutationHelpers(state) {
 
   // 暴露给父页面调用，确保代码注入后能扫描所有窗口
   win.injectWindowControls = injectWindowControls;
+  win.addWindowToDock = addWindowToDock;
 
   win.bringToFront = function(el) {
     topZ++;
@@ -662,6 +690,19 @@ function setupMutationHelpers(state) {
   };
 
   doc.addEventListener('keydown', function(e) {
+    // 转发全局快捷键到父页面
+    if (e.ctrlKey && e.key === 's') {
+      e.preventDefault();
+      var st = getActiveState();
+      if (st) exportApp(st);
+      return;
+    }
+    if (e.ctrlKey && e.key === 'o') {
+      e.preventDefault();
+      var st2 = getActiveState();
+      if (st2) importApp(st2);
+      return;
+    }
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
     var activeWin = doc.querySelector('.evolva-window.active');
     if (!activeWin) return;
@@ -1066,6 +1107,68 @@ async function showAboutDialog() {
 // === Export / Import ===
 var tauriDialog = window.__TAURI__.dialog;
 
+// 捕获 iframe 内所有窗口的位置/尺寸状态
+function captureWindowStates(state) {
+  var iframeDoc = state.iframe.contentDocument;
+  if (!iframeDoc) return null;
+  var windows = iframeDoc.querySelectorAll('.evolva-window');
+  var result = [];
+  for (var i = 0; i < windows.length; i++) {
+    var w = windows[i];
+    result.push({
+      id: w.id || '',
+      x: parseFloat(w.getAttribute('data-x')) || 0,
+      y: parseFloat(w.getAttribute('data-y')) || 0,
+      width: w.style.width || '',
+      height: w.style.height || '',
+      maximized: w.classList.contains('maximized'),
+      display: w.style.display === 'none' ? 'none' : '',
+      restore: {
+        x: w.getAttribute('data-restore-x') || '',
+        y: w.getAttribute('data-restore-y') || '',
+        w: w.getAttribute('data-restore-w') || '',
+        h: w.getAttribute('data-restore-h') || ''
+      }
+    });
+  }
+  return result.length > 0 ? result : null;
+}
+
+// 恢复 iframe 内窗口的位置/尺寸状态
+function applyWindowStates(state, states) {
+  if (!states || !Array.isArray(states)) return;
+  var iframeDoc = state.iframe.contentDocument;
+  if (!iframeDoc) return;
+  for (var i = 0; i < states.length; i++) {
+    var s = states[i];
+    var el = s.id ? iframeDoc.getElementById(s.id) : null;
+    if (!el) continue;
+    if (s.x || s.y) {
+      el.style.transform = 'translate(' + s.x + 'px,' + s.y + 'px)';
+      el.setAttribute('data-x', s.x);
+      el.setAttribute('data-y', s.y);
+    }
+    if (s.width) el.style.width = s.width;
+    if (s.height) el.style.height = s.height;
+    if (s.maximized) {
+      el.classList.add('maximized');
+      if (s.restore) {
+        if (s.restore.x) el.setAttribute('data-restore-x', s.restore.x);
+        if (s.restore.y) el.setAttribute('data-restore-y', s.restore.y);
+        if (s.restore.w) el.setAttribute('data-restore-w', s.restore.w);
+        if (s.restore.h) el.setAttribute('data-restore-h', s.restore.h);
+      }
+    }
+    if (s.display === 'none') {
+      el.style.display = 'none';
+      // 重建 Dock 条目
+      if (state.iframe.contentWindow.addWindowToDock) {
+        state.iframe.contentWindow.addWindowToDock(el);
+      }
+    }
+  }
+}
+
 async function exportApp(state) {
   try {
     var count = await invoke('get_mutation_count', { tabId: state.id });
@@ -1078,7 +1181,8 @@ async function exportApp(state) {
     if (!filePath) return;
 
     var name = filePath.split(/[\/]/).pop().replace('.evolva.json', '').replace('.json', '');
-    await invoke('export_app', { path: filePath, name: name, tabId: state.id });
+    var windowStates = captureWindowStates(state);
+    await invoke('export_app', { path: filePath, name: name, tabId: state.id, windowStates: windowStates });
     log(state, 'system', t('logExported', { count: count }));
   } catch (err) {
     log(state, 'error', t('logExportFailed') + String(err));
@@ -1099,7 +1203,7 @@ async function importApp(state) {
     });
     if (!selected) return;
 
-    var codes = await invoke('import_app', { path: selected, tabId: state.id });
+    var result = await invoke('import_app', { path: selected, tabId: state.id });
 
     var iframeDoc = state.iframe.contentDocument;
     while (iframeDoc.body.firstChild) iframeDoc.body.removeChild(iframeDoc.body.firstChild);
@@ -1108,12 +1212,15 @@ async function importApp(state) {
 
     setupMutationHelpers(state);
 
-    for (var i = 0; i < codes.length; i++) {
-      injectCode(state, codes[i]);
+    for (var i = 0; i < result.codes.length; i++) {
+      injectCode(state, result.codes[i]);
     }
-    await invoke('auto_save', { tabId: state.id, tabName: state.name });
+    // 恢复窗口状态
+    applyWindowStates(state, result.states);
+    var windowStates = captureWindowStates(state);
+    await invoke('auto_save', { tabId: state.id, tabName: state.name, windowStates: windowStates });
     updateContext(state);
-    log(state, 'system', t('logImported', { count: codes.length }));
+    log(state, 'system', t('logImported', { count: result.codes.length }));
   } catch (err) {
     log(state, 'error', t('logImportFailed') + String(err));
   }
@@ -1433,7 +1540,8 @@ async function mutate(state) {
     }
 
     await invoke('save_mutation', { tabId: state.id, instruction: userMsg, code: result.code });
-    await invoke('auto_save', { tabId: state.id, tabName: state.name });
+    var winStates = captureWindowStates(state);
+    await invoke('auto_save', { tabId: state.id, tabName: state.name, windowStates: winStates });
     log(state, 'system', t('logMutationApplied'));
     state.promptEl.style.height = 'auto';
     updateContext(state);
@@ -1479,6 +1587,16 @@ document.addEventListener('keydown', function(e) {
   if (e.ctrlKey && e.key === 'w') {
     e.preventDefault();
     if (activeTabId) closeTab(activeTabId);
+  }
+  if (e.ctrlKey && e.key === 's') {
+    e.preventDefault();
+    var st = getActiveState();
+    if (st) exportApp(st);
+  }
+  if (e.ctrlKey && e.key === 'o') {
+    e.preventDefault();
+    var st2 = getActiveState();
+    if (st2) importApp(st2);
   }
   if (e.ctrlKey && e.key === 'Tab') {
     e.preventDefault();
@@ -1530,14 +1648,15 @@ document.getElementById('tab-about').addEventListener('click', showAboutDialog);
           if (!st) continue;
           switchTab(st.id);
           try {
-            var codes = await invoke('auto_load', { tabId: saved.tab_id });
-            if (codes && codes.length > 0) {
-              for (var j = 0; j < codes.length; j++) {
-                injectCode(st, codes[j]);
+            var result = await invoke('auto_load', { tabId: saved.tab_id });
+            if (result && result.codes && result.codes.length > 0) {
+              for (var j = 0; j < result.codes.length; j++) {
+                injectCode(st, result.codes[j]);
               }
+              applyWindowStates(st, result.states);
               updateContext(st);
             }
-            log(st, 'system', t('logAutoLoaded', { count: codes ? codes.length : 0 }));
+            log(st, 'system', t('logAutoLoaded', { count: result && result.codes ? result.codes.length : 0 }));
           } catch (err) {
             log(st, 'error', t('logImportFailed') + String(err));
           }
