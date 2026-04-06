@@ -162,6 +162,7 @@ function TabState(id, name) {
   this.coreEl = null;
   this.processing = false;
   this.mutationSpaceReady = false;
+  this.coreHidden = false;
   this.logEl = null;
   this.promptEl = null;
   this.sendBtn = null;
@@ -169,7 +170,6 @@ function TabState(id, name) {
   this.sendSpinner = null;
   this.contextFill = null;
   this.contextText = null;
-  this.collapseToggle = null;
 }
 
 function getActiveState() {
@@ -238,7 +238,7 @@ function switchTab(tabId) {
 
   // 显示目标标签页
   state.iframe.style.display = '';
-  state.coreEl.style.display = '';
+  state.coreEl.style.display = state.coreHidden ? 'none' : '';
   activeTabId = tabId;
 
   updateTabBarUI();
@@ -338,6 +338,42 @@ function updateTabBarUI() {
   }
 }
 
+// 主页面 Dock 栏
+function ensureMainDock() {
+  var existing = document.getElementById('main-dock');
+  if (existing) return existing;
+  var dock = document.createElement('div');
+  dock.id = 'main-dock';
+  dock.className = 'evolva-dock';
+  dock.style.display = 'none';
+  document.body.appendChild(dock);
+  return dock;
+}
+
+function updateMainDockVisibility() {
+  var dock = document.getElementById('main-dock');
+  if (!dock) return;
+  var items = dock.querySelectorAll('.dock-item');
+  dock.style.display = items.length > 0 ? '' : 'none';
+}
+
+function addCoreToDock(state) {
+  var dock = ensureMainDock();
+  var titleEl = state.coreEl.querySelector('.window-header h2');
+  var title = titleEl ? titleEl.textContent : 'Evolva';
+  var item = document.createElement('div');
+  item.className = 'dock-item';
+  item.textContent = title;
+  item.addEventListener('click', function() {
+    state.coreEl.style.display = '';
+    state.coreHidden = false;
+    item.remove();
+    updateMainDockVisibility();
+  });
+  dock.appendChild(item);
+  updateMainDockVisibility();
+}
+
 // === Create Core Element (per-tab control panel) ===
 
 function createCoreElement(state) {
@@ -348,7 +384,11 @@ function createCoreElement(state) {
   core.innerHTML =
     '<div class="window-header">' +
       '<div><h2>Evolva</h2><p></p></div>' +
-      '<button class="collapse-toggle">&#9660;</button>' +
+      '<div class="window-controls">' +
+        '<button class="window-ctrl-btn window-ctrl-minimize">&#x2500;</button>' +
+        '<button class="window-ctrl-btn window-ctrl-maximize">&#x25A1;</button>' +
+        '<button class="window-ctrl-btn window-ctrl-close">&#x2715;</button>' +
+      '</div>' +
     '</div>' +
     '<div class="menu-bar">' +
       '<button class="menu-btn menu-import"></button>' +
@@ -372,7 +412,6 @@ function createCoreElement(state) {
   state.sendSpinner = core.querySelector('.send-spinner');
   state.contextFill = core.querySelector('.context-fill');
   state.contextText = core.querySelector('.context-text');
-  state.collapseToggle = core.querySelector('.collapse-toggle');
 
   // 绑定事件
   state.sendBtn.addEventListener('click', function() { mutate(state); });
@@ -383,10 +422,37 @@ function createCoreElement(state) {
     this.style.height = 'auto';
     this.style.height = Math.min(this.scrollHeight, 140) + 'px';
   });
-  state.collapseToggle.addEventListener('click', function() {
-    var collapsed = core.classList.toggle('collapsed');
-    this.innerHTML = collapsed ? '&#9654;' : '&#9660;';
+
+  // 窗口控制按钮
+  core.querySelector('.window-ctrl-minimize').addEventListener('click', function() {
+    core.classList.toggle('collapsed');
   });
+  core.querySelector('.window-ctrl-maximize').addEventListener('click', function() {
+    if (core.classList.contains('maximized')) {
+      var rx = core.getAttribute('data-restore-x') || '0';
+      var ry = core.getAttribute('data-restore-y') || '0';
+      var rw = core.getAttribute('data-restore-w') || '460';
+      var rh = core.getAttribute('data-restore-h') || '620';
+      core.style.width = rw + 'px';
+      core.style.height = rh + 'px';
+      core.style.transform = 'translate(' + rx + 'px,' + ry + 'px)';
+      core.setAttribute('data-x', parseFloat(rx));
+      core.setAttribute('data-y', parseFloat(ry));
+      core.classList.remove('maximized');
+    } else {
+      core.setAttribute('data-restore-x', core.getAttribute('data-x') || '0');
+      core.setAttribute('data-restore-y', core.getAttribute('data-y') || '0');
+      core.setAttribute('data-restore-w', core.style.width || (core.offsetWidth + ''));
+      core.setAttribute('data-restore-h', core.style.height || (core.offsetHeight + ''));
+      core.classList.add('maximized');
+    }
+  });
+  core.querySelector('.window-ctrl-close').addEventListener('click', function() {
+    core.style.display = 'none';
+    state.coreHidden = true;
+    addCoreToDock(state);
+  });
+
   core.querySelector('.menu-export').addEventListener('click', function() { exportApp(state); });
   core.querySelector('.menu-import').addEventListener('click', function() { importApp(state); });
 
@@ -454,7 +520,89 @@ function setupMutationHelpers(state) {
   var doc = state.iframe.contentDocument;
   var topZ = 100;
 
+  // 关闭窗口 → 添加到主页面 Dock 栏（统一管理）
+  function addWindowToDock(winEl) {
+    var dock = ensureMainDock();
+    var titleEl = winEl.querySelector('.window-header h2');
+    var title = titleEl ? titleEl.textContent : (winEl.id || 'Window');
+    var item = document.createElement('div');
+    item.className = 'dock-item';
+    item.textContent = title;
+    item.addEventListener('click', function() {
+      winEl.style.display = '';
+      item.remove();
+      updateMainDockVisibility();
+      win.bringToFront(winEl);
+    });
+    dock.appendChild(item);
+    updateMainDockVisibility();
+  }
+
+  // 为窗口注入控制按钮（最小化/最大化/关闭）
+  function injectWindowControls(el) {
+    var header = el.querySelector('.window-header');
+    if (!header || header.querySelector('.window-controls')) return;
+
+    var controls = doc.createElement('div');
+    controls.className = 'window-controls';
+
+    var minBtn = doc.createElement('button');
+    minBtn.className = 'window-ctrl-btn window-ctrl-minimize';
+    minBtn.innerHTML = '&#x2500;';
+
+    var maxBtn = doc.createElement('button');
+    maxBtn.className = 'window-ctrl-btn window-ctrl-maximize';
+    maxBtn.innerHTML = '&#x25A1;';
+
+    var closeBtn = doc.createElement('button');
+    closeBtn.className = 'window-ctrl-btn window-ctrl-close';
+    closeBtn.innerHTML = '&#x2715;';
+
+    controls.appendChild(minBtn);
+    controls.appendChild(maxBtn);
+    controls.appendChild(closeBtn);
+    header.appendChild(controls);
+
+    // 最小化/还原（收缩为仅 header，仍可拖拽）
+    minBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      el.classList.toggle('minimized');
+    });
+
+    // 最大化/还原
+    maxBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      if (el.classList.contains('maximized')) {
+        var rx = el.getAttribute('data-restore-x') || '0';
+        var ry = el.getAttribute('data-restore-y') || '0';
+        var rw = el.getAttribute('data-restore-w') || '400';
+        var rh = el.getAttribute('data-restore-h') || '300';
+        el.style.width = rw + 'px';
+        el.style.height = rh + 'px';
+        el.style.transform = 'translate(' + rx + 'px,' + ry + 'px)';
+        el.setAttribute('data-x', parseFloat(rx));
+        el.setAttribute('data-y', parseFloat(ry));
+        el.classList.remove('maximized');
+      } else {
+        el.setAttribute('data-restore-x', el.getAttribute('data-x') || '0');
+        el.setAttribute('data-restore-y', el.getAttribute('data-y') || '0');
+        el.setAttribute('data-restore-w', el.style.width || (el.offsetWidth + ''));
+        el.setAttribute('data-restore-h', el.style.height || (el.offsetHeight + ''));
+        el.classList.add('maximized');
+      }
+    });
+
+    // 关闭 → 隐藏窗口并添加到 Dock 栏
+    closeBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      el.style.display = 'none';
+      addWindowToDock(el);
+    });
+  }
+
   win.setupDraggable = function(el) {
+    injectWindowControls(el);
+
     win.interact(el)
       .draggable({
         allowFrom: '.window-header',
@@ -463,6 +611,7 @@ function setupMutationHelpers(state) {
         listeners: {
           move: function(event) {
             var target = event.target;
+            if (target.classList.contains('maximized')) return;
             var x = (parseFloat(target.getAttribute('data-x')) || 0) + event.dx;
             var y = (parseFloat(target.getAttribute('data-y')) || 0) + event.dy;
             target.style.transform = 'translate(' + x + 'px,' + y + 'px)';
@@ -476,6 +625,7 @@ function setupMutationHelpers(state) {
         listeners: {
           move: function(event) {
             var target = event.target;
+            if (target.classList.contains('maximized') || target.classList.contains('minimized')) return;
             var x = (parseFloat(target.getAttribute('data-x')) || 0) + event.deltaRect.left;
             var y = (parseFloat(target.getAttribute('data-y')) || 0) + event.deltaRect.top;
             target.style.width = event.rect.width + 'px';
@@ -487,6 +637,9 @@ function setupMutationHelpers(state) {
         }
       });
   };
+
+  // 暴露给父页面调用，确保代码注入后能扫描所有窗口
+  win.injectWindowControls = injectWindowControls;
 
   win.bringToFront = function(el) {
     topZ++;
@@ -519,6 +672,34 @@ function setupMutationHelpers(state) {
     var handlers = keyHandlers.get(activeWin);
     if (handlers) handlers.keyup.forEach(function(fn) { fn(e); });
   });
+
+  // MutationObserver：自动为新增的窗口注入控制按钮
+  var ctrlObserver = new MutationObserver(function(mutations) {
+    for (var i = 0; i < mutations.length; i++) {
+      var added = mutations[i].addedNodes;
+      for (var j = 0; j < added.length; j++) {
+        var node = added[j];
+        if (node.nodeType !== 1) continue;
+        if (node.classList && node.classList.contains('evolva-window')) {
+          injectWindowControls(node);
+        }
+        if (node.querySelectorAll) {
+          var wins = node.querySelectorAll('.evolva-window');
+          for (var k = 0; k < wins.length; k++) {
+            injectWindowControls(wins[k]);
+          }
+        }
+        // header 后添加的情况
+        if (node.classList && node.classList.contains('window-header')) {
+          var winEl = node.parentElement;
+          if (winEl && winEl.classList.contains('evolva-window')) {
+            injectWindowControls(winEl);
+          }
+        }
+      }
+    }
+  });
+  ctrlObserver.observe(doc.body, { childList: true, subtree: true });
 }
 
 // === Theme ===
@@ -1061,6 +1242,7 @@ function handleSandboxInvoke(source, id, payload) {
   var allowedCommands = {
     'get_app_info': true,
     'estimate_tokens': true,
+    'open_url': true,
     'sandbox_read_file': true,
     'sandbox_write_file': true,
     'sandbox_proxy_fetch': true,
@@ -1150,6 +1332,12 @@ function handleSandboxClipboard(source, id, payload) {
   }
 }
 
+// 处理 iframe 中的外部链接打开请求
+window.addEventListener('message', function(event) {
+  if (!event.data || event.data.type !== 'evolva-open-url') return;
+  invoke('open_url', { url: event.data.url });
+});
+
 // parent 端 postMessage 监听
 window.addEventListener('message', function (event) {
   var data = event.data;
@@ -1186,6 +1374,15 @@ function injectCode(state, code) {
   script.textContent = '(async () => {\n' + safeCode + '\n})();';
   iframeDoc.body.appendChild(script);
   script.remove();
+
+  // 代码注入后，确保所有窗口都有控制按钮
+  var iframeWin = state.iframe.contentWindow;
+  if (iframeWin && iframeWin.injectWindowControls) {
+    var windows = iframeDoc.querySelectorAll('.evolva-window');
+    for (var i = 0; i < windows.length; i++) {
+      iframeWin.injectWindowControls(windows[i]);
+    }
+  }
 }
 
 // === Mutation Loop ===

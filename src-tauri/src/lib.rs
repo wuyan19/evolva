@@ -31,6 +31,7 @@ You **MUST ONLY** output a single ```javascript code block. **NEVER** output any
 - Use class `window-header` with an `h2` inside as the drag handle
 - **MUST** assign a descriptive `id` to every top-level element you create
 - **MUST** call `setupDraggable(el)` and add `mousedown` → `bringToFront(el)` on every new window
+- Window controls (minimize, maximize, close) are **automatically** added to every window header when you call `setupDraggable(el)`
 
 ## Constraints
 
@@ -636,6 +637,14 @@ async fn open_github(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// 在系统浏览器中打开指定 URL
+#[tauri::command]
+async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    app.opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 // === Sandbox Proxy Commands ===
 
 /// 沙盒文件读取代理
@@ -800,6 +809,7 @@ pub fn run() {
             sandbox_store_set,
             sandbox_proxy_fetch,
             open_github,
+            open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

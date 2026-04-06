@@ -91,7 +91,13 @@
   } catch (_) {}
 
   // 4. 阻止打开新窗口 / 关闭窗口
-  window.open = _block('window.open()');
+  window.open = function(url) {
+    if (typeof url === 'string' && (url.indexOf('http://') === 0 || url.indexOf('https://') === 0)) {
+      _parentPostMessage({ type: 'evolva-open-url', url: url }, '*');
+      return null;
+    }
+    throw new Error('[Evolva Sandbox] window.open() is not available.');
+  };
   window.close = _block('window.close()');
 
   // 5. 阻止 XMLHttpRequest（现代代码用 fetch）
@@ -242,6 +248,20 @@
       return sendRequest('clipboard', { action: 'write', text: text });
     }
   };
+
+  // 拦截外部链接点击，使用系统浏览器打开
+  document.addEventListener('click', function(e) {
+    var el = e.target;
+    while (el && el.tagName !== 'A') { el = el.parentElement; }
+    if (!el) return;
+    var href = el.getAttribute('href');
+    if (!href) return;
+    if (href.indexOf('http://') === 0 || href.indexOf('https://') === 0) {
+      e.preventDefault();
+      e.stopPropagation();
+      _parentPostMessage({ type: 'evolva-open-url', url: href }, '*');
+    }
+  });
 
   // 通知 parent sandbox 已就绪
   _parentPostMessage({ type: 'evolva-sandbox-ready' }, '*');
