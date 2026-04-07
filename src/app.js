@@ -53,6 +53,15 @@ var LANG = {
     permClipboard: 'Clipboard',
     settingsBasic: 'General',
     settingsSecurity: 'Security',
+    providers: 'Providers',
+    addProvider: 'Add Provider',
+    removeProvider: 'Remove',
+    providerName: 'Profile Name',
+    activateProvider: 'Use',
+    noProviders: 'No providers configured. Add one to get started.',
+    providerActive: 'Active',
+    editProvider: 'Edit',
+    copyProvider: 'Copy',
     checkUpdate: 'Check for Updates',
     checking: 'Checking...',
     newVersion: 'New version {version} available',
@@ -115,6 +124,15 @@ var LANG = {
     permClipboard: '剪贴板',
     settingsBasic: '基础设置',
     settingsSecurity: '安全设置',
+    providers: '供应商',
+    addProvider: '添加供应商',
+    removeProvider: '删除',
+    providerName: '配置名称',
+    activateProvider: '使用',
+    noProviders: '尚未配置供应商，请添加后开始使用。',
+    providerActive: '当前使用',
+    editProvider: '编辑',
+    copyProvider: '复制',
     checkUpdate: '检查更新',
     checking: '检查中...',
     newVersion: '发现新版本 {version}',
@@ -822,12 +840,29 @@ function log(state, actor, message) {
 }
 
 // === Settings Dialog ===
+
+// 协议默认值表
+var PROTOCOL_DEFAULTS = {
+  openai:     { base_url: 'https://api.openai.com/v1', model: 'gpt-4o', label: 'OpenAI' },
+  anthropic:  { base_url: 'https://api.anthropic.com', model: 'claude-sonnet-4-20250514', label: 'Anthropic' },
+  deepseek:   { base_url: 'https://api.deepseek.com', model: 'deepseek-chat', label: 'DeepSeek' },
+  gemini:     { base_url: 'https://generativelanguage.googleapis.com', model: 'gemini-2.5-flash', label: 'Google Gemini' },
+  groq:       { base_url: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile', label: 'Groq' },
+  mistral:    { base_url: 'https://api.mistral.ai/v1', model: 'mistral-large-latest', label: 'Mistral' },
+  openrouter: { base_url: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-sonnet-4-20250514', label: 'OpenRouter' },
+  ollama:     { base_url: 'http://localhost:11434', model: 'llama3', label: 'Ollama (Local)' },
+};
+
+function generateId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
 function showSettingsDialog() {
   var state = getActiveState();
   invoke('load_settings').then(function(settings) {
     buildSettingsDialog(state, settings);
   }).catch(function() {
-    buildSettingsDialog(state, { api_key: '', base_url: '', model: '', protocol: 'openai' });
+    buildSettingsDialog(state, { providers: [], active_provider_id: null, theme: '', language: '', permissions: null });
   });
 }
 
@@ -837,25 +872,206 @@ function buildSettingsDialog(state, settings) {
   var dlg = document.createElement('div');
   dlg.className = 'settings-dialog';
   var isLight = document.body.classList.contains('light');
+
+  // 当前状态（编辑过程中维护，保存时提交）
+  var providers = (settings.providers || []).map(function(p) { return Object.assign({}, p); });
+  var activeId = settings.active_provider_id || null;
+  var editingId = null; // 正在编辑的供应商 ID
+
+  function protocolLabel(p) { return (PROTOCOL_DEFAULTS[p] || {}).label || p; }
+
+  function renderProviderList() {
+    var listEl = dlg.querySelector('#provider-list');
+    if (!listEl) return;
+    if (providers.length === 0) {
+      listEl.innerHTML = '<div style="color:var(--text-muted);font-size:12px;text-align:center;padding:20px 0;">' + t('noProviders') + '</div>';
+      return;
+    }
+    var html = '';
+    providers.forEach(function(p) {
+      var isActive = p.id === activeId;
+      html += '<div class="provider-item' + (isActive ? ' active' : '') + '" data-id="' + p.id + '">' +
+        '<div class="provider-info">' +
+          '<div class="provider-name">' + (p.name || protocolLabel(p.protocol)) + '</div>' +
+          '<div class="provider-protocol">' + protocolLabel(p.protocol) + ' &middot; ' + (p.model || '') + '</div>' +
+        '</div>' +
+        '<div class="provider-actions">' +
+          (isActive ? '<span class="provider-active-badge">' + t('providerActive') + '</span>' :
+            '<button class="provider-btn activate" data-id="' + p.id + '">' + t('activateProvider') + '</button>') +
+          '<button class="provider-btn edit" data-id="' + p.id + '">' + t('editProvider') + '</button>' +
+          '<button class="provider-btn copy" data-id="' + p.id + '">' + t('copyProvider') + '</button>' +
+          '<button class="provider-btn remove" data-id="' + p.id + '">' + t('removeProvider') + '</button>' +
+        '</div>' +
+      '</div>';
+    });
+    listEl.innerHTML = html;
+
+    // 绑定事件
+    listEl.querySelectorAll('.provider-btn.activate').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        activeId = this.getAttribute('data-id');
+        renderProviderList();
+      });
+    });
+    listEl.querySelectorAll('.provider-btn.edit').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var id = this.getAttribute('data-id');
+        startEdit(id);
+      });
+    });
+    listEl.querySelectorAll('.provider-btn.remove').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var id = this.getAttribute('data-id');
+        providers = providers.filter(function(p) { return p.id !== id; });
+        if (activeId === id) activeId = providers.length > 0 ? providers[0].id : null;
+        renderProviderList();
+      });
+    });
+    listEl.querySelectorAll('.provider-btn.copy').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var id = this.getAttribute('data-id');
+        var src = providers.find(function(p) { return p.id === id; });
+        if (!src) return;
+        var copy = Object.assign({}, src, { id: generateId(), name: src.name + ' (Copy)' });
+        providers.push(copy);
+        renderProviderList();
+      });
+    });
+  }
+
+  function startEdit(id) {
+    var p = providers.find(function(x) { return x.id === id; });
+    if (!p) return;
+    editingId = id;
+    showEditor(p);
+  }
+
+  // 打开独立的供应商编辑弹窗
+  function showEditor(p) {
+    var editorOverlay = document.createElement('div');
+    editorOverlay.className = 'settings-overlay';
+    editorOverlay.style.zIndex = '100000';
+    var ed = document.createElement('div');
+    ed.className = 'settings-dialog';
+    ed.innerHTML =
+      '<h3>' + (editingId ? t('editProvider') : t('addProvider')) + '</h3>' +
+      '<label>' + t('providerName') + '</label>' +
+      '<input type="text" id="ed-name" placeholder="My GPT-4o">' +
+      '<label>' + t('protocol') + '</label>' +
+      '<select id="ed-protocol">' +
+        Object.keys(PROTOCOL_DEFAULTS).map(function(k) {
+          return '<option value="' + k + '">' + PROTOCOL_DEFAULTS[k].label + '</option>';
+        }).join('') +
+      '</select>' +
+      '<div id="ed-api-key-row">' +
+        '<label>' + t('apiKey') + '</label>' +
+        '<div style="position:relative"><input type="password" id="ed-api-key" placeholder="sk-..." style="width:100%;padding-right:32px"><span id="ed-key-toggle" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;opacity:0.5;font-size:13px;user-select:none">&#128065;</span></div>' +
+      '</div>' +
+      '<label>' + t('baseUrl') + '</label>' +
+      '<input type="text" id="ed-base-url">' +
+      '<label>' + t('model') + '</label>' +
+      '<input type="text" id="ed-model">' +
+      '<div style="display:flex;gap:8px;margin-top:6px">' +
+        '<button id="ed-confirm" style="background:var(--accent);color:var(--accent-on);border:none;padding:7px 14px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">' + t('ok') + '</button>' +
+        '<button id="ed-cancel" style="background:var(--btn-bg);color:var(--text-primary);border:1px solid var(--btn-border);padding:7px 14px;border-radius:5px;cursor:pointer;font-size:12px;">' + t('cancel') + '</button>' +
+      '</div>';
+    editorOverlay.appendChild(ed);
+    document.body.appendChild(editorOverlay);
+
+    // 填充值
+    ed.querySelector('#ed-name').value = p ? p.name : '';
+    ed.querySelector('#ed-protocol').value = p ? p.protocol : 'openai';
+    ed.querySelector('#ed-api-key').value = p ? p.api_key : '';
+    ed.querySelector('#ed-base-url').value = p ? p.base_url : (PROTOCOL_DEFAULTS['openai'] || {}).base_url || '';
+    ed.querySelector('#ed-model').value = p ? p.model : (PROTOCOL_DEFAULTS['openai'] || {}).model || '';
+    updateApiKeyVisibility(ed, p ? p.protocol : 'openai');
+    ed.querySelector('#ed-name').focus();
+
+    // 协议切换自动填充
+    ed.querySelector('#ed-protocol').addEventListener('change', function() {
+      var protocol = this.value;
+      var defaults = PROTOCOL_DEFAULTS[protocol] || {};
+      var baseInput = ed.querySelector('#ed-base-url');
+      var modelInput = ed.querySelector('#ed-model');
+      var isDefaultUrl = Object.values(PROTOCOL_DEFAULTS).some(function(d) { return d.base_url === baseInput.value; });
+      var isDefaultModel = Object.values(PROTOCOL_DEFAULTS).some(function(d) { return d.model === modelInput.value; });
+      if (isDefaultUrl || !baseInput.value) baseInput.value = defaults.base_url || '';
+      if (isDefaultModel || !modelInput.value) modelInput.value = defaults.model || '';
+      updateApiKeyVisibility(ed, protocol);
+    });
+
+    // API Key 显隐
+    ed.querySelector('#ed-key-toggle').addEventListener('click', function() {
+      var input = ed.querySelector('#ed-api-key');
+      var isPassword = input.type === 'password';
+      input.type = isPassword ? 'text' : 'password';
+      this.textContent = isPassword ? '\u{1F648}' : '\u{1F441}';
+    });
+
+    // 确认
+    ed.querySelector('#ed-confirm').addEventListener('click', function() {
+      var protocol = ed.querySelector('#ed-protocol').value;
+      var defaults = PROTOCOL_DEFAULTS[protocol] || {};
+      var data = {
+        id: editingId || generateId(),
+        name: ed.querySelector('#ed-name').value.trim() || protocolLabel(protocol),
+        protocol: protocol,
+        api_key: ed.querySelector('#ed-api-key').value.trim(),
+        base_url: ed.querySelector('#ed-base-url').value.trim() || defaults.base_url || '',
+        model: ed.querySelector('#ed-model').value.trim() || defaults.model || '',
+      };
+      if (editingId) {
+        var idx = providers.findIndex(function(p) { return p.id === editingId; });
+        if (idx >= 0) providers[idx] = data;
+      } else {
+        providers.push(data);
+        if (providers.length === 1) activeId = data.id;
+      }
+      editingId = null;
+      editorOverlay.remove();
+      renderProviderList();
+    });
+
+    // 取消
+    ed.querySelector('#ed-cancel').addEventListener('click', function() {
+      editingId = null;
+      editorOverlay.remove();
+    });
+
+    // 不响应遮罩点击，只能通过按钮关闭
+  }
+
+  function updateApiKeyVisibility(ed, protocol) {
+    var row = ed.querySelector('#ed-api-key-row');
+    if (row) row.style.display = protocol === 'ollama' ? 'none' : '';
+  }
+
   dlg.innerHTML =
     '<h3>' + t('settings') + '</h3>' +
     '<div class="settings-tabs">' +
-      '<button class="settings-tab active" data-tab="basic">' + t('settingsBasic') + '</button>' +
+      '<button class="settings-tab active" data-tab="providers">' + t('providers') + '</button>' +
+      '<button class="settings-tab" data-tab="general">' + t('settingsBasic') + '</button>' +
       '<button class="settings-tab" data-tab="security">' + t('settingsSecurity') + '</button>' +
     '</div>' +
-    '<div class="settings-panel" id="panel-basic">' +
-      '<label>' + t('apiKey') + '</label>' +
-      '<div style="position:relative"><input type="password" id="dlg-api-key" placeholder="sk-..." style="width:100%;padding-right:32px"><span id="dlg-key-toggle" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;opacity:0.5;font-size:13px;user-select:none">&#128065;</span></div>' +
-      '<label>' + t('baseUrl') + '</label>' +
-      '<input type="text" id="dlg-base-url" placeholder="https://api.openai.com/v1">' +
-      '<label>' + t('protocol') + '</label>' +
-      '<select id="dlg-protocol"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select>' +
-      '<label>' + t('model') + '</label>' +
-      '<input type="text" id="dlg-model" placeholder="gpt-4o">' +
+
+    // 供应商标签页
+    '<div class="settings-panel" id="panel-providers">' +
+      '<button id="add-provider-btn" class="add-provider-btn">+ ' + t('addProvider') + '</button>' +
+      '<div id="provider-list" class="provider-list"></div>' +
+    '</div>' +
+
+    // 通用标签页
+    '<div class="settings-panel" id="panel-general" style="display:none">' +
       '<label>' + t('language') + '</label>' +
       '<select id="dlg-lang"><option value="zh">中文</option><option value="en">English</option></select>' +
       '<div class="theme-row"><label>' + t('theme') + '</label><div id="dlg-theme" class="theme-toggle' + (isLight ? ' light' : '') + '"></div></div>' +
     '</div>' +
+
+    // 安全标签页
     '<div class="settings-panel" id="panel-security" style="display:none">' +
       '<div class="permissions-section">' +
         '<h4>' + t('sandboxPermissions') + '</h4>' +
@@ -866,6 +1082,7 @@ function buildSettingsDialog(state, settings) {
         '<div class="permission-row"><span>' + t('permClipboard') + '</span><div id="perm-clipboard" class="permission-toggle' + (settings.permissions && settings.permissions.clipboard ? ' on' : '') + '"></div></div>' +
       '</div>' +
     '</div>' +
+
     '<div style="display:flex;gap:8px;margin-top:4px">' +
     '<button id="dlg-save" style="background:var(--accent);color:var(--accent-on);border:none;padding:7px 14px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">' + t('save') + '</button>' +
     '<button id="dlg-cancel" style="background:var(--btn-bg);color:var(--text-primary);border:1px solid var(--btn-border);padding:7px 14px;border-radius:5px;cursor:pointer;font-size:12px;">' + t('cancel') + '</button>' +
@@ -874,11 +1091,10 @@ function buildSettingsDialog(state, settings) {
   overlay.appendChild(dlg);
   document.body.appendChild(overlay);
 
-  dlg.querySelector('#dlg-api-key').value = settings.api_key || '';
-  dlg.querySelector('#dlg-base-url').value = settings.base_url || '';
-  dlg.querySelector('#dlg-model').value = settings.model || '';
-  dlg.querySelector('#dlg-protocol').value = settings.protocol || 'openai';
   dlg.querySelector('#dlg-lang').value = currentLang;
+
+  // 渲染供应商列表
+  renderProviderList();
 
   // 标签页切换
   dlg.querySelectorAll('.settings-tab').forEach(function(tab) {
@@ -886,47 +1102,45 @@ function buildSettingsDialog(state, settings) {
       dlg.querySelectorAll('.settings-tab').forEach(function(t) { t.classList.remove('active'); });
       this.classList.add('active');
       var target = this.getAttribute('data-tab');
-      dlg.querySelector('#panel-basic').style.display = target === 'basic' ? '' : 'none';
+      dlg.querySelector('#panel-providers').style.display = target === 'providers' ? '' : 'none';
+      dlg.querySelector('#panel-general').style.display = target === 'general' ? '' : 'none';
       dlg.querySelector('#panel-security').style.display = target === 'security' ? '' : 'none';
     });
   });
 
+  // 主题切换
   dlg.querySelector('#dlg-theme').addEventListener('click', function() {
     var nowLight = !document.body.classList.contains('light');
     applyTheme(nowLight);
     this.classList.toggle('light', nowLight);
   });
 
-  // 权限 toggle 开关事件
-  var permKeys = ['network', 'fs-read', 'fs-write', 'tauri-api', 'storage', 'clipboard'];
-  permKeys.forEach(function(key) {
-    var toggle = dlg.querySelector('#perm-' + key);
-    if (toggle) {
-      toggle.addEventListener('click', function() { this.classList.toggle('on'); });
-    }
-  });
-
+  // 语言切换
   dlg.querySelector('#dlg-lang').addEventListener('change', function() {
     currentLang = this.value;
     localStorage.setItem('evolva_lang', currentLang);
     applyLanguage();
   });
 
-  dlg.querySelector('#dlg-key-toggle').addEventListener('click', function() {
-    var input = dlg.querySelector('#dlg-api-key');
-    var isPassword = input.type === 'password';
-    input.type = isPassword ? 'text' : 'password';
-    this.textContent = isPassword ? '\u{1F648}' : '\u{1F441}';
+  // 权限 toggle
+  ['network', 'fs-read', 'fs-write', 'storage', 'clipboard'].forEach(function(key) {
+    var toggle = dlg.querySelector('#perm-' + key);
+    if (toggle) toggle.addEventListener('click', function() { this.classList.toggle('on'); });
   });
 
+  // 添加供应商
+  dlg.querySelector('#add-provider-btn').addEventListener('click', function() {
+    editingId = null;
+    showEditor(null);
+  });
+
+  // 保存
   dlg.querySelector('#dlg-save').addEventListener('click', async function() {
     try {
       await invoke('save_settings', {
         settings: {
-          api_key: dlg.querySelector('#dlg-api-key').value.trim(),
-          base_url: dlg.querySelector('#dlg-base-url').value.trim(),
-          model: dlg.querySelector('#dlg-model').value.trim(),
-          protocol: dlg.querySelector('#dlg-protocol').value,
+          providers: providers,
+          active_provider_id: activeId,
           theme: document.body.classList.contains('light') ? 'light' : 'dark',
           language: currentLang,
           permissions: {
@@ -938,7 +1152,6 @@ function buildSettingsDialog(state, settings) {
           }
         }
       });
-      // 重新加载权限并广播到所有 iframe
       await loadPermissions();
       broadcastPermissions();
       log(state, 'system', t('logSettingsSaved'));

@@ -1,7 +1,8 @@
 use regex::Regex;
 use rig::completion::{Chat, ToolDefinition, CompletionModel};
 use rig::client::CompletionClient;
-use rig::providers::{anthropic, openai};
+use rig::providers::{anthropic, openai, deepseek, gemini, groq, mistral, openrouter, ollama};
+use rig::client::Nothing;
 use rig::tool::Tool;
 use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use serde::{Deserialize, Serialize};
@@ -373,16 +374,77 @@ impl Tool for GrepTool {
     }
 }
 
+/// 生成简单唯一 ID
+fn generate_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{:x}", ts)
+}
+
+/// 单个供应商配置档案
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderProfile {
+    id: String,
+    name: String,
+    protocol: String,
+    #[serde(default)]
+    api_key: String,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    model: String,
+}
+
+impl ProviderProfile {
+    fn new(name: &str, protocol: &str) -> Self {
+        Self {
+            id: generate_id(),
+            name: name.to_string(),
+            protocol: protocol.to_string(),
+            api_key: String::new(),
+            base_url: Self::default_base_url(protocol),
+            model: Self::default_model(protocol),
+        }
+    }
+
+    fn default_base_url(protocol: &str) -> String {
+        match protocol {
+            "openai" => "https://api.openai.com/v1".to_string(),
+            "anthropic" => "https://api.anthropic.com".to_string(),
+            "deepseek" => "https://api.deepseek.com".to_string(),
+            "gemini" => "https://generativelanguage.googleapis.com".to_string(),
+            "groq" => "https://api.groq.com/openai/v1".to_string(),
+            "mistral" => "https://api.mistral.ai/v1".to_string(),
+            "openrouter" => "https://openrouter.ai/api/v1".to_string(),
+            "ollama" => "http://localhost:11434".to_string(),
+            _ => String::new(),
+        }
+    }
+
+    fn default_model(protocol: &str) -> String {
+        match protocol {
+            "openai" => "gpt-4o".to_string(),
+            "anthropic" => "claude-sonnet-4-20250514".to_string(),
+            "deepseek" => "deepseek-chat".to_string(),
+            "gemini" => "gemini-2.5-flash".to_string(),
+            "groq" => "llama-3.3-70b-versatile".to_string(),
+            "mistral" => "mistral-large-latest".to_string(),
+            "openrouter" => "anthropic/claude-sonnet-4-20250514".to_string(),
+            "ollama" => "llama3".to_string(),
+            _ => String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Settings {
     #[serde(default)]
-    api_key: String,
-    #[serde(default = "default_base_url")]
-    base_url: String,
-    #[serde(default = "default_model")]
-    model: String,
-    #[serde(default = "default_protocol")]
-    protocol: String,
+    providers: Vec<ProviderProfile>,
+    #[serde(default)]
+    active_provider_id: Option<String>,
     #[serde(default)]
     theme: String,
     #[serde(default)]
@@ -407,6 +469,18 @@ struct PermissionsConfig {
     clipboard: bool,
 }
 
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            providers: Vec::new(),
+            active_provider_id: None,
+            theme: String::new(),
+            language: String::new(),
+            permissions: None,
+        }
+    }
+}
+
 impl Default for PermissionsConfig {
     fn default() -> Self {
         PermissionsConfig {
@@ -416,30 +490,6 @@ impl Default for PermissionsConfig {
             tauri_api: false,
             storage: false,
             clipboard: false,
-        }
-    }
-}
-
-fn default_base_url() -> String {
-    "https://api.openai.com/v1".to_string()
-}
-fn default_model() -> String {
-    "gpt-4o".to_string()
-}
-fn default_protocol() -> String {
-    "openai".to_string()
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Settings {
-            api_key: String::new(),
-            base_url: default_base_url(),
-            model: default_model(),
-            protocol: default_protocol(),
-            theme: String::new(),
-            language: String::new(),
-            permissions: None,
         }
     }
 }
@@ -524,7 +574,44 @@ fn load_settings_from_file(app: &tauri::AppHandle) -> Settings {
         Ok(c) => c,
         Err(_) => return Settings::default(),
     };
-    serde_json::from_str(&content).unwrap_or_default()
+
+    let mut settings: Settings = serde_json::from_str(&content).unwrap_or_default();
+
+    // 向后兼容：旧格式有 api_key 字段但无 providers，自动迁移
+    if settings.providers.is_empty() {
+        if let Ok(old) = serde_json::from_str::<serde_json::Value>(&content) {
+            let old_api_key = old.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+            if !old_api_key.is_empty() {
+                let protocol = old.get("protocol").and_then(|v| v.as_str()).unwrap_or("openai");
+                let profile = ProviderProfile {
+                    id: generate_id(),
+                    name: "Migrated".to_string(),
+                    protocol: protocol.to_string(),
+                    api_key: old_api_key.to_string(),
+                    base_url: old.get("base_url").and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| ProviderProfile::default_base_url(protocol)),
+                    model: old.get("model").and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| ProviderProfile::default_model(protocol)),
+                };
+                settings.active_provider_id = Some(profile.id.clone());
+                settings.providers.push(profile);
+                settings.theme = old.get("theme").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                settings.language = old.get("language").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                settings.permissions = old.get("permissions")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+                // 写回新格式
+                if let Ok(json) = serde_json::to_string_pretty(&settings) {
+                    let _ = std::fs::write(&path, json);
+                }
+            }
+        }
+    }
+
+    settings
 }
 
 // === Agent Hook (工具调用日志) ===
@@ -603,8 +690,14 @@ async fn call_llm(
 ) -> Result<LlmResult, String> {
     let settings = load_settings_from_file(&app);
 
-    if settings.api_key.is_empty() && settings.base_url.is_empty() {
-        return Err("Configure settings first".to_string());
+    // 获取激活的供应商配置
+    let provider = settings.active_provider_id
+        .as_ref()
+        .and_then(|id| settings.providers.iter().find(|p| &p.id == id))
+        .ok_or("No active provider configured. Please add one in Settings.".to_string())?;
+
+    if provider.api_key.is_empty() && provider.protocol != "ollama" {
+        return Err("API Key is empty. Please configure it in Settings.".to_string());
     }
 
     // 获取当前标签页的项目文件系统（克隆到 Arc<Mutex> 中供工具使用）
@@ -630,53 +723,93 @@ async fn call_llm(
         map.get(&req.tab_id).cloned().unwrap_or_default()
     };
 
+    // 宏：为每种 provider 构建统一的 agent 调用
+    macro_rules! build_and_chat {
+        ($client:expr) => {{
+            let agent = $client.agent(&provider.model)
+                .preamble(SYSTEM_PROMPT)
+                .max_tokens(16384)
+                .default_max_turns(20)
+                .hook(hook.clone())
+                .tool(read_tool)
+                .tool(write_tool)
+                .tool(edit_tool)
+                .tool(list_tool)
+                .tool(grep_tool)
+                .build();
+
+            agent.chat(&req.instruction, &history)
+                .await
+                .map_err(|e| format!("Agent error: {}", e))?
+        }};
+    }
+
     // 根据 protocol 构建 rig agent 并调用
-    let text = match settings.protocol.as_str() {
+    let text = match provider.protocol.as_str() {
         "anthropic" => {
             let client = anthropic::Client::builder()
-                .api_key(&settings.api_key)
-                .base_url(&settings.base_url)
+                .api_key(&provider.api_key)
+                .base_url(&provider.base_url)
                 .build()
                 .map_err(|e| format!("Anthropic client error: {}", e))?;
-
-            let agent = client.agent(&settings.model)
-                .preamble(SYSTEM_PROMPT)
-                .max_tokens(16384)
-                .default_max_turns(20)
-                .hook(hook.clone())
-                .tool(read_tool)
-                .tool(write_tool)
-                .tool(edit_tool)
-                .tool(list_tool)
-                .tool(grep_tool)
-                .build();
-
-            agent.chat(&req.instruction, &history)
-                .await
-                .map_err(|e| format!("Agent error: {}", e))?
+            build_and_chat!(client)
+        }
+        "deepseek" => {
+            let client = deepseek::Client::builder()
+                .api_key(&provider.api_key)
+                .base_url(&provider.base_url)
+                .build()
+                .map_err(|e| format!("DeepSeek client error: {}", e))?;
+            build_and_chat!(client)
+        }
+        "gemini" => {
+            let client = gemini::Client::builder()
+                .api_key(&provider.api_key)
+                .base_url(&provider.base_url)
+                .build()
+                .map_err(|e| format!("Gemini client error: {}", e))?;
+            build_and_chat!(client)
+        }
+        "groq" => {
+            let client = groq::Client::builder()
+                .api_key(&provider.api_key)
+                .base_url(&provider.base_url)
+                .build()
+                .map_err(|e| format!("Groq client error: {}", e))?;
+            build_and_chat!(client)
+        }
+        "mistral" => {
+            let client = mistral::Client::builder()
+                .api_key(&provider.api_key)
+                .base_url(&provider.base_url)
+                .build()
+                .map_err(|e| format!("Mistral client error: {}", e))?;
+            build_and_chat!(client)
+        }
+        "openrouter" => {
+            let client = openrouter::Client::builder()
+                .api_key(&provider.api_key)
+                .base_url(&provider.base_url)
+                .build()
+                .map_err(|e| format!("OpenRouter client error: {}", e))?;
+            build_and_chat!(client)
+        }
+        "ollama" => {
+            let client = ollama::Client::builder()
+                .api_key(Nothing)
+                .base_url(&provider.base_url)
+                .build()
+                .map_err(|e| format!("Ollama client error: {}", e))?;
+            build_and_chat!(client)
         }
         _ => {
+            // 默认 OpenAI 兼容协议
             let client = openai::CompletionsClient::builder()
-                .api_key(&settings.api_key)
-                .base_url(&settings.base_url)
+                .api_key(&provider.api_key)
+                .base_url(&provider.base_url)
                 .build()
                 .map_err(|e| format!("OpenAI client error: {}", e))?;
-
-            let agent = client.agent(&settings.model)
-                .preamble(SYSTEM_PROMPT)
-                .max_tokens(16384)
-                .default_max_turns(20)
-                .hook(hook.clone())
-                .tool(read_tool)
-                .tool(write_tool)
-                .tool(edit_tool)
-                .tool(list_tool)
-                .tool(grep_tool)
-                .build();
-
-            agent.chat(&req.instruction, &history)
-                .await
-                .map_err(|e| format!("Agent error: {}", e))?
+            build_and_chat!(client)
         }
     };
 

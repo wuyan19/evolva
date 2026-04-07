@@ -247,7 +247,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 20px 24px;
-  width: 440px;
+  width: 540px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -512,6 +512,101 @@ body {
   border-bottom-color: var(--accent);
 }
 .settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* === Provider List === */
+.provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+}
+.provider-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  transition: border-color 0.2s;
+}
+.provider-item:hover {
+  border-color: var(--border-active);
+}
+.provider-item.active {
+  border-color: var(--accent);
+  background: rgba(0, 212, 255, 0.05);
+}
+.provider-info {
+  flex: 1;
+  min-width: 0;
+}
+.provider-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.provider-protocol {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+.provider-actions {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+  align-items: center;
+}
+.provider-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  transition: color 0.15s, background 0.15s;
+}
+.provider-btn:hover {
+  color: var(--text-primary);
+  background: var(--btn-bg);
+}
+.provider-active-badge {
+  font-size: 9px;
+  padding: 2px 6px;
+  background: var(--accent);
+  color: var(--accent-on);
+  border-radius: 3px;
+  font-weight: 600;
+}
+.add-provider-btn {
+  background: var(--btn-bg);
+  border: 1px dashed var(--btn-border);
+  color: var(--text-muted);
+  padding: 7px 14px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  width: 100%;
+  text-align: center;
+  transition: border-color 0.2s, color 0.2s;
+}
+.add-provider-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.provider-editor {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
   display: flex;
   flex-direction: column;
   gap: 6px;
