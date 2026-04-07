@@ -10,7 +10,16 @@
   var requestCounter = 0;
 
   // 在覆盖 parent 之前捕获 parent.postMessage
-  var _parentPostMessage = window.parent.postMessage.bind(window.parent);
+  // doc.write() 重新加载时 window.parent 已被前次 sandbox 锁死，需复用缓存
+  var _parentPostMessage;
+  try {
+    _parentPostMessage = window.parent.postMessage.bind(window.parent);
+  } catch (_) {
+    _parentPostMessage = window.__evolva_pmp;
+  }
+  if (_parentPostMessage) {
+    window.__evolva_pmp = _parentPostMessage;
+  }
 
   function sendRequest(channel, payload) {
     return new Promise(function (resolve, reject) {

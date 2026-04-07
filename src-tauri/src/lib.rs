@@ -1,52 +1,377 @@
 use regex::Regex;
+use rig::completion::{Chat, ToolDefinition, CompletionModel};
+use rig::client::CompletionClient;
+use rig::providers::{anthropic, openai};
+use rig::tool::Tool;
+use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 #[cfg(desktop)]
 use tauri_plugin_opener::OpenerExt;
 
 // === Compiled-in System Prompt ===
-const SYSTEM_PROMPT: &str = r#"You are Evolva, a self-evolving application that modifies a webpage based on user instructions.
+const SYSTEM_PROMPT: &str = r#"You are Evolva, a self-evolving web application builder. The user will give you instructions, and you must modify the project files to implement their request.
 
-## Output
+## Project Structure
 
-You **MUST ONLY** output a single ```javascript code block. **NEVER** output any text, explanation, or markdown outside the code fence.
+The project has three files you can work with:
+- `index.html` — The HTML body content (do NOT include `<html>/<head>/<body>` wrappers, `<script src="app.js">`, or `<link href="style.css">` — all files are assembled inline automatically)
+- `style.css` — Custom CSS styles (theme variables and window system styles are already defined by the base theme — only add your own styles)
+- `app.js` — JavaScript logic (runs as a plain `<script>`, NOT a module — use `evolva.import()` for external modules)
 
-## Available APIs
+## Tools
 
-- `setupDraggable(element)` — enable drag/resize on a window element
-- `bringToFront(element)` — bring a window to front (adds `.active` class)
-- `onActiveKeydown(windowEl, handler)` / `onActiveKeyup(windowEl, handler)` — scoped keyboard handlers for the active window
-- `await evolva.import('package-name')` — dynamic import of npm packages via esm.sh (e.g. `await evolva.import('chart.js')`). **Use this instead of `import()` or `require()`**. Supports browser-compatible JS libraries only (no Node.js built-ins, no native addons).
-- `await evolva.readFile(path)` — read a file from disk
-- `await evolva.writeFile(path, content)` — write a file to disk
-- `await evolva.store(key)` / `await evolva.store(key, value)` / `await evolva.store(key, null)` — read / write / delete persistent key-value pair
-- `await evolva.clipboardRead()` / `await evolva.clipboardWrite(text)` — read / write clipboard
+You have the following tools to read and modify project files:
+- `read_file` — Read a file's content
+- `write_file` — Write/create a file (full content replacement)
+- `edit_file` — Search and replace in a file (old_text must be unique)
+- `list_files` — List all project files
+- `grep` — Search across all files with a regex pattern
 
-## Window System
+## Workflow
 
-- New UI elements **MUST** use class `evolva-window` (position:absolute, flex-column, pre-styled with rounded corners and shadow)
-- Use class `window-header` with an `h2` inside as the drag handle
-- **MUST** assign a descriptive `id` to every top-level element you create
-- **MUST** call `setupDraggable(el)` and add `mousedown` → `bringToFront(el)` on every new window
-- Window controls (minimize, maximize, close) are **automatically** added to every window header when you call `setupDraggable(el)`
+1. First, use `read_file` or `list_files` to understand the current state of the project
+2. Plan your changes based on the user's instruction
+3. Use `write_file` or `edit_file` to make changes
+4. After all changes, respond with a brief summary of what you did
 
-## Constraints
+## Window System (IMPORTANT)
 
-- **NEVER** assign to `document.body.innerHTML`
-- **NEVER** redefine `setupDraggable`, `bringToFront`, `onActiveKeydown`, `onActiveKeyup`
-- **NEVER** use `import()` or `require()` — use `await evolva.import()` instead
-- **NEVER** use `document.addEventListener('keydown/keyup', ...)` — use `onActiveKeydown/onActiveKeyup` instead
-- **MUST** modify existing elements in place rather than recreating them
-- **MUST** reuse existing CSS variables and classes rather than defining new styles
+The runtime provides a draggable window system. UI elements should be wrapped in windows:
 
-## Theming
+```html
+<div id="my-window" class="evolva-window" style="width:400px;height:300px">
+  <div class="window-header"><h2>Window Title</h2></div>
+  <div class="window-body" style="padding:12px;flex:1;overflow:auto">
+    <!-- content here -->
+  </div>
+</div>
+```
 
-CSS variables: `--accent`, `--bg-window`, `--bg-header`, `--bg-input`, `--border`, `--text-primary`, `--text-muted`, `--btn-bg`, `--btn-border`, `--color-error`, --color-warning`"#;
+Rules:
+- Always use class `evolva-window` for top-level containers (position:absolute, flex-column, pre-styled with theme)
+- Always include `<div class="window-header"><h2>Title</h2></div>` as the first child (acts as drag handle)
+- Assign a descriptive `id` to every window element
+- Window controls (minimize, maximize, close) are automatically injected by the runtime — do NOT add them yourself
+- Content goes inside a wrapper div after the header (use `style="padding:12px;flex:1;overflow:auto"`)
+- Set explicit `width` and `height` on each window; position them with `style="left:Xpx;top:Ypx"` or use `transform:translate(Xpx,Ypx)`
+
+## Available CSS Variables
+
+```css
+--accent: #00d4ff;            /* Primary accent color (cyan) */
+--accent-on: #0f0f1a;         /* Text on accent background */
+--bg-canvas: #0f0f1a;         /* Canvas/dot-grid background */
+--bg-window: #16213e;         /* Window background */
+--bg-header: #1a1a30;         /* Window header background */
+--bg-input: #0f0f1a;          /* Input field background */
+--border: #2a2a4a;            /* Border color */
+--border-active: #3a3a5a;     /* Active border */
+--text-primary: #e0e0e0;      /* Primary text */
+--text-muted: #5a5a7a;        /* Muted/secondary text */
+--btn-bg: #2a2a4a;            /* Button background */
+--btn-border: #3a3a5a;        /* Button border */
+--color-error: #ef4444;       /* Error red */
+--color-warning: #f59e0b;     /* Warning amber */
+--shadow-window: 0 8px 32px rgba(0,0,0,0.4);
+--shadow-active: 0 8px 32px rgba(0,212,255,0.15);
+```
+
+Use these variables for consistent theming. For example: `background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border);`
+
+## Runtime APIs
+
+The following APIs are available in the sandbox environment:
+
+- **HTTP requests**: `fetch()` works normally (transparently proxied, CORS bypassed)
+- **Import npm modules**: `const mod = await evolva.import('module-name')` (loaded via esm.sh)
+- **Persistent storage**: `await evolva.store('key')` to read, `await evolva.store('key', 'value')` to write
+- **File access**: `await evolva.readFile(path)` / `await evolva.writeFile(path, content)`
+- **Clipboard**: `await evolva.clipboardRead()` / `await evolva.clipboardWrite(text)`
+- **External links**: `<a href="https://...">` opens in system browser automatically
+- **localStorage**: Available but in-memory only (not persisted between sessions)
+
+## Guidelines
+
+- Write clean, well-structured HTML/CSS/JS
+- Use modern CSS (flexbox, grid, variables) and modern JS (async/await, const/let)
+- Use the provided CSS variables for colors, backgrounds, borders — do NOT hardcode values that already exist as variables
+- Prefer `edit_file` for targeted changes; use `write_file` for new files or major rewrites
+- All JavaScript runs in a plain script context — do NOT use `import`/`export` statements, use `evolva.import()` instead"#;
 
 // === Types ===
+
+/// 项目文件系统：文件路径 → 文件内容的内存映射
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ProjectFs {
+    files: HashMap<String, String>,
+}
+
+impl ProjectFs {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn read(&self, path: &str) -> Result<String, String> {
+        self.files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| format!("File not found: {}", path))
+    }
+
+    fn write(&mut self, path: &str, content: &str) {
+        self.files.insert(path.to_string(), content.to_string());
+    }
+
+    fn edit(&mut self, path: &str, old_text: &str, new_text: &str) -> Result<(), String> {
+        let content = self.files.get_mut(path).ok_or_else(|| format!("File not found: {}", path))?;
+        let count = content.matches(old_text).count();
+        if count == 0 {
+            return Err(format!("old_text not found in {}", path));
+        }
+        if count > 1 {
+            return Err(format!("old_text appears {} times in {}, must be unique", count, path));
+        }
+        *content = content.replace(old_text, new_text);
+        Ok(())
+    }
+
+    fn list(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self.files.keys().cloned().collect();
+        paths.sort();
+        paths
+    }
+
+    fn grep(&self, pattern: &str) -> Result<Vec<GrepMatch>, String> {
+        let re = Regex::new(pattern).map_err(|e| format!("Invalid regex: {}", e))?;
+        let mut results = Vec::new();
+        let mut paths: Vec<&String> = self.files.keys().collect();
+        paths.sort();
+        for path in paths {
+            if let Some(content) = self.files.get(path) {
+                for (i, line) in content.lines().enumerate() {
+                    if re.is_match(line) {
+                        results.push(GrepMatch {
+                            file: path.clone(),
+                            line_number: i + 1,
+                            line: line.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GrepMatch {
+    file: String,
+    line_number: usize,
+    line: String,
+}
+
+// === 工具错误类型 ===
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct ToolErr(String);
+
+// === 项目文件系统工具 ===
+
+type SharedProjectFs = Arc<Mutex<ProjectFs>>;
+
+// --- read_file ---
+#[derive(Deserialize)]
+struct ReadFileArgs {
+    path: String,
+}
+
+struct ReadFileTool {
+    fs: SharedProjectFs,
+}
+
+impl Tool for ReadFileTool {
+    const NAME: &'static str = "read_file";
+    type Error = ToolErr;
+    type Args = ReadFileArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "read_file".to_string(),
+            description: "Read the content of a file in the project. Returns the full file content.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path, e.g. index.html, style.css, app.js" }
+                },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let fs = self.fs.lock().map_err(|e| ToolErr(e.to_string()))?;
+        fs.read(&args.path).map_err(ToolErr)
+    }
+}
+
+// --- write_file ---
+#[derive(Deserialize)]
+struct WriteFileArgs {
+    path: String,
+    content: String,
+}
+
+struct WriteFileTool {
+    fs: SharedProjectFs,
+}
+
+impl Tool for WriteFileTool {
+    const NAME: &'static str = "write_file";
+    type Error = ToolErr;
+    type Args = WriteFileArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "write_file".to_string(),
+            description: "Write content to a file in the project. Creates the file if it does not exist, overwrites if it does.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path, e.g. index.html, style.css, app.js" },
+                    "content": { "type": "string", "description": "Full file content to write" }
+                },
+                "required": ["path", "content"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let mut fs = self.fs.lock().map_err(|e| ToolErr(e.to_string()))?;
+        fs.write(&args.path, &args.content);
+        Ok(format!("Written {} bytes to {}", args.content.len(), args.path))
+    }
+}
+
+// --- edit_file ---
+#[derive(Deserialize)]
+struct EditFileArgs {
+    path: String,
+    old_text: String,
+    new_text: String,
+}
+
+struct EditFileTool {
+    fs: SharedProjectFs,
+}
+
+impl Tool for EditFileTool {
+    const NAME: &'static str = "edit_file";
+    type Error = ToolErr;
+    type Args = EditFileArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "edit_file".to_string(),
+            description: "Search and replace in a project file. The old_text must appear exactly once in the file.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path" },
+                    "old_text": { "type": "string", "description": "Exact text to find (must be unique in the file)" },
+                    "new_text": { "type": "string", "description": "Replacement text" }
+                },
+                "required": ["path", "old_text", "new_text"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let mut fs = self.fs.lock().map_err(|e| ToolErr(e.to_string()))?;
+        fs.edit(&args.path, &args.old_text, &args.new_text).map_err(ToolErr)?;
+        Ok(format!("Edited {}", args.path))
+    }
+}
+
+// --- list_files ---
+#[derive(Deserialize)]
+struct ListFilesArgs {}
+
+struct ListFilesTool {
+    fs: SharedProjectFs,
+}
+
+impl Tool for ListFilesTool {
+    const NAME: &'static str = "list_files";
+    type Error = ToolErr;
+    type Args = ListFilesArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "list_files".to_string(),
+            description: "List all files in the project. Returns file paths sorted alphabetically.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        }
+    }
+
+    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let fs = self.fs.lock().map_err(|e| ToolErr(e.to_string()))?;
+        let files = fs.list();
+        Ok(files.join("\n"))
+    }
+}
+
+// --- grep ---
+#[derive(Deserialize)]
+struct GrepArgs {
+    pattern: String,
+}
+
+struct GrepTool {
+    fs: SharedProjectFs,
+}
+
+impl Tool for GrepTool {
+    const NAME: &'static str = "grep";
+    type Error = ToolErr;
+    type Args = GrepArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "grep".to_string(),
+            description: "Search for a regex pattern across all project files. Returns matching lines with file paths and line numbers.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Regular expression pattern to search for" }
+                },
+                "required": ["pattern"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let fs = self.fs.lock().map_err(|e| ToolErr(e.to_string()))?;
+        let matches = fs.grep(&args.pattern).map_err(ToolErr)?;
+        if matches.is_empty() {
+            return Ok("No matches found".to_string());
+        }
+        let result: Vec<String> = matches.iter().map(|m| format!("{}:{}: {}", m.file, m.line_number, m.line)).collect();
+        Ok(result.join("\n"))
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Settings {
@@ -130,10 +455,19 @@ struct ExportData {
     version: u32,
     name: String,
     created_at: String,
-    active_version: usize,
+    /// v1: 变更列表；v2: 忽略
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     versions: Vec<Mutation>,
+    /// v2: 项目文件 { path: content }
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    files: Option<HashMap<String, String>>,
+    /// v1: active_version；v2: 忽略
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    active_version: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     states: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    window_states: Option<serde_json::Value>,
 }
 
 /// import_app / auto_load 的返回类型
@@ -145,21 +479,22 @@ struct LoadResult {
 
 #[derive(Deserialize)]
 struct LlmRequest {
-    dom: String,
     instruction: String,
+    #[serde(rename = "tabId")]
+    tab_id: String,
+}
+
+#[derive(Serialize, Clone)]
+struct ToolCallLog {
+    tool: String,
+    args: String,
+    result: String,
 }
 
 #[derive(Serialize)]
 struct LlmResult {
-    code: Option<String>,
-    raw: String,
-}
-
-#[derive(Serialize)]
-struct TokenEstimate {
-    tokens: usize,
-    max_tokens: usize,
-    percentage: f64,
+    text: String,
+    tool_calls: Vec<ToolCallLog>,
 }
 
 // === Helper Functions ===
@@ -192,155 +527,56 @@ fn load_settings_from_file(app: &tauri::AppHandle) -> Settings {
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-/// Strip all <script> tags from HTML (case-insensitive)
-fn strip_script_tags(html: &str) -> String {
-    let re = Regex::new(r"(?i)<script[\s\S]*?</script>").unwrap();
-    re.replace_all(html, "").to_string()
+// === Agent Hook (工具调用日志) ===
+
+#[derive(Clone)]
+struct ToolLogHook {
+    logs: Arc<Mutex<Vec<ToolCallLog>>>,
 }
 
-/// Compress whitespace: collapse multiple blank lines into one
-fn compress_whitespace(html: &str) -> String {
-    let re = Regex::new(r"\n{3,}").unwrap();
-    re.replace_all(html.trim(), "\n\n").to_string()
-}
-
-/// Capture and compress DOM: strip scripts, compress whitespace
-fn capture_dom(html: &str) -> String {
-    let stripped = strip_script_tags(html);
-    compress_whitespace(&stripped)
-}
-
-/// Extract JS code from LLM markdown response
-fn extract_code(response: &str) -> Option<String> {
-    let patterns = [
-        r"```(?:javascript|js|jsx|ts|typescript)?\s*\n([\s\S]*?)```",
-        r"~~~(?:javascript|js|jsx|ts|typescript)?\s*\n([\s\S]*?)~~~",
-    ];
-    for pat in &patterns {
-        let re = Regex::new(pat).unwrap();
-        if let Some(caps) = re.captures(response) {
-            if let Some(m) = caps.get(1) {
-                return Some(m.as_str().trim().to_string());
-            }
-        }
-    }
-    None
-}
-
-// === LLM API Calls ===
-
-async fn call_openai(
-    api_key: &str,
-    base_url: &str,
-    model: &str,
-    system: &str,
-    user: &str,
-) -> Result<String, String> {
-    let client = reqwest::Client::new();
-    let mut headers = reqwest::header::HeaderMap::new();
-
-    if !api_key.is_empty() {
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", api_key).parse().unwrap(),
-        );
-    }
-    headers.insert(
-        reqwest::header::CONTENT_TYPE,
-        "application/json".parse().unwrap(),
-    );
-
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user}
-        ]
-    });
-
-    let resp = client
-        .post(&url)
-        .headers(headers)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("API error {}: {}", status, text));
-    }
-
-    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-
-    json["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "No content in response".to_string())
-}
-
-async fn call_anthropic(
-    api_key: &str,
-    base_url: &str,
-    model: &str,
-    system: &str,
-    user: &str,
-) -> Result<String, String> {
-    let client = reqwest::Client::new();
-    let mut headers = reqwest::header::HeaderMap::new();
-
-    if !api_key.is_empty() {
-        headers.insert("x-api-key", api_key.parse().unwrap());
-    }
-    headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
-    headers.insert(
-        reqwest::header::CONTENT_TYPE,
-        "application/json".parse().unwrap(),
-    );
-
-    let base = base_url.trim_end_matches('/').trim_end_matches("/v1");
-    let url = format!("{}/v1/messages", base);
-
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": 16384,
-        "system": system,
-        "messages": [
-            {"role": "user", "content": user}
-        ]
-    });
-
-    let resp = client
-        .post(&url)
-        .headers(headers)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("API error {}: {}", status, text));
-    }
-
-    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-
-    if let Some(content) = json["content"].as_array() {
-        for block in content {
-            if block["type"] == "text" {
-                return block["text"]
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| "No text in content block".to_string());
-            }
+impl ToolLogHook {
+    fn new() -> Self {
+        Self {
+            logs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    Err("No text content block found".to_string())
+    fn take_logs(&self) -> Vec<ToolCallLog> {
+        let mut logs = self.logs.lock().unwrap();
+        std::mem::take(&mut *logs)
+    }
+}
+
+impl<M: CompletionModel> PromptHook<M> for ToolLogHook {
+    async fn on_tool_call(
+        &self,
+        tool_name: &str,
+        _tool_call_id: Option<String>,
+        _internal_call_id: &str,
+        args: &str,
+    ) -> ToolCallHookAction {
+        // 记录工具调用（结果在 on_tool_result 中补全）
+        ToolCallHookAction::cont()
+    }
+
+    async fn on_tool_result(
+        &self,
+        tool_name: &str,
+        _tool_call_id: Option<String>,
+        _internal_call_id: &str,
+        args: &str,
+        result: &str,
+    ) -> HookAction {
+        let entry = ToolCallLog {
+            tool: tool_name.to_string(),
+            args: args.to_string(),
+            result: result.to_string(),
+        };
+        if let Ok(mut logs) = self.logs.lock() {
+            logs.push(entry);
+        }
+        HookAction::cont()
+    }
 }
 
 // === Tauri Commands ===
@@ -359,98 +595,240 @@ async fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), 
 }
 
 #[tauri::command]
-async fn call_llm(app: tauri::AppHandle, req: LlmRequest) -> Result<LlmResult, String> {
-    // Load settings from backend file
+async fn call_llm(
+    app: tauri::AppHandle,
+    projects: tauri::State<'_, Mutex<HashMap<String, ProjectFs>>>,
+    histories: tauri::State<'_, Mutex<HashMap<String, Vec<rig::completion::message::Message>>>>,
+    req: LlmRequest,
+) -> Result<LlmResult, String> {
     let settings = load_settings_from_file(&app);
 
     if settings.api_key.is_empty() && settings.base_url.is_empty() {
         return Err("Configure settings first".to_string());
     }
 
-    // Capture and compress DOM
-    let dom = capture_dom(&req.dom);
-    eprintln!("[call_llm] DOM after capture: {} chars, instruction: {:?}", dom.len(), req.instruction);
+    // 获取当前标签页的项目文件系统（克隆到 Arc<Mutex> 中供工具使用）
+    let project_fs = {
+        let map = projects.lock().map_err(|e| e.to_string())?;
+        map.get(&req.tab_id).cloned().unwrap_or_default()
+    };
+    let shared_fs = Arc::new(Mutex::new(project_fs));
 
-    // Build user message
-    let user_msg = format!("Current DOM:\n```\n{}\n```\n\nUser instruction: {}", dom, req.instruction);
+    // 构建工具
+    let read_tool = ReadFileTool { fs: shared_fs.clone() };
+    let write_tool = WriteFileTool { fs: shared_fs.clone() };
+    let edit_tool = EditFileTool { fs: shared_fs.clone() };
+    let list_tool = ListFilesTool { fs: shared_fs.clone() };
+    let grep_tool = GrepTool { fs: shared_fs.clone() };
 
-    // Call LLM API
-    let raw = match settings.protocol.as_str() {
+    // 构建日志 hook
+    let hook = ToolLogHook::new();
+
+    // 构建对话历史
+    let history = {
+        let map = histories.lock().map_err(|e| e.to_string())?;
+        map.get(&req.tab_id).cloned().unwrap_or_default()
+    };
+
+    // 根据 protocol 构建 rig agent 并调用
+    let text = match settings.protocol.as_str() {
         "anthropic" => {
-            call_anthropic(&settings.api_key, &settings.base_url, &settings.model, SYSTEM_PROMPT, &user_msg).await?
+            let client = anthropic::Client::builder()
+                .api_key(&settings.api_key)
+                .base_url(&settings.base_url)
+                .build()
+                .map_err(|e| format!("Anthropic client error: {}", e))?;
+
+            let agent = client.agent(&settings.model)
+                .preamble(SYSTEM_PROMPT)
+                .max_tokens(16384)
+                .default_max_turns(20)
+                .hook(hook.clone())
+                .tool(read_tool)
+                .tool(write_tool)
+                .tool(edit_tool)
+                .tool(list_tool)
+                .tool(grep_tool)
+                .build();
+
+            agent.chat(&req.instruction, &history)
+                .await
+                .map_err(|e| format!("Agent error: {}", e))?
         }
         _ => {
-            call_openai(&settings.api_key, &settings.base_url, &settings.model, SYSTEM_PROMPT, &user_msg).await?
+            let client = openai::CompletionsClient::builder()
+                .api_key(&settings.api_key)
+                .base_url(&settings.base_url)
+                .build()
+                .map_err(|e| format!("OpenAI client error: {}", e))?;
+
+            let agent = client.agent(&settings.model)
+                .preamble(SYSTEM_PROMPT)
+                .max_tokens(16384)
+                .default_max_turns(20)
+                .hook(hook.clone())
+                .tool(read_tool)
+                .tool(write_tool)
+                .tool(edit_tool)
+                .tool(list_tool)
+                .tool(grep_tool)
+                .build();
+
+            agent.chat(&req.instruction, &history)
+                .await
+                .map_err(|e| format!("Agent error: {}", e))?
         }
     };
 
-    // Extract code from response
-    eprintln!("[call_llm] LLM raw response: {} chars", raw.len());
-    let code = extract_code(&raw);
-    match &code {
-        Some(c) => eprintln!("[call_llm] Extracted code: {} chars", c.len()),
-        None => eprintln!("[call_llm] No code block found in response"),
+    // 收集工具调用日志
+    let tool_calls = hook.take_logs();
+
+    // 更新对话历史
+    {
+        let mut map = histories.lock().map_err(|e| e.to_string())?;
+        let hist = map.entry(req.tab_id.clone()).or_insert_with(Vec::new);
+        hist.push(rig::completion::message::Message::user(&req.instruction));
+        hist.push(rig::completion::message::Message::assistant(&text));
+        // 保留最近 20 轮（40 条消息）
+        if hist.len() > 40 {
+            *hist = hist.split_off(hist.len() - 40);
+        }
     }
 
-    Ok(LlmResult { code, raw })
+    // 将修改后的项目文件系统写回状态
+    {
+        let mut map = projects.lock().map_err(|e| e.to_string())?;
+        let updated_fs = shared_fs.lock().map_err(|e| e.to_string())?;
+        map.insert(req.tab_id.clone(), updated_fs.clone());
+    }
+
+    eprintln!("[call_llm] Agent response: {} chars, {} tool calls", text.len(), tool_calls.len());
+
+    Ok(LlmResult { text, tool_calls })
 }
 
 #[tauri::command]
-fn estimate_tokens(dom: String) -> TokenEstimate {
-    let stripped = capture_dom(&dom);
-    let tokens = stripped.len() / 4;
-    let max_tokens = 128000;
-    let percentage = ((tokens as f64) / (max_tokens as f64) * 100.0).min(100.0);
-    TokenEstimate {
-        tokens,
-        max_tokens,
-        percentage,
-    }
-}
-
-#[tauri::command]
-fn save_mutation(
-    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
+fn build_preview(
+    projects: tauri::State<'_, Mutex<HashMap<String, ProjectFs>>>,
     tab_id: String,
-    instruction: String,
-    code: String,
+) -> Result<String, String> {
+    let map = projects.lock().map_err(|e| e.to_string())?;
+    let fs = map.get(&tab_id).ok_or("Tab project not found".to_string())?;
+
+    let html_body = fs.read("index.html").unwrap_or_default();
+    let css = fs.read("style.css").unwrap_or_default();
+    let js = fs.read("app.js").unwrap_or_default();
+
+    // 移除 index.html 中对项目文件 app.js / style.css 的引用
+    // 这些文件已在模板中内联包含，通过相对路径加载会命中主应用的同名文件
+    let html_body = Regex::new(r#"(?i)<script[^>]*src\s*=\s*["']app\.js["'][^>]*>[\s\S]*?</script>"#)
+        .unwrap()
+        .replace_all(&html_body, "")
+        .into_owned();
+    let html_body = Regex::new(r#"(?i)<link[^>]*href\s*=\s*["']style\.css["'][^>]*/?>"#)
+        .unwrap()
+        .replace_all(&html_body, "")
+        .into_owned();
+
+    eprintln!("[build_preview] tab={} files={} html={}B css={}B js={}B",
+        tab_id, fs.files.len(), html_body.len(), css.len(), js.len());
+    let base_css = include_str!("../../src/style.css");
+    let sandbox_js = include_str!("../../src/sandbox.js");
+
+    // 安全处理：防止 </script 截断 HTML 解析
+    let safe_sandbox = sandbox_js.replace("</script", "<\\/script");
+    let safe_js = js.replace("</script", "<\\/script");
+
+    // 注入错误捕获脚本，将 iframe 内的错误转发给父页面
+    let error_capture = r#"
+window.onerror = function(msg, url, line, col, err) {
+  window.parent.postMessage({ type: 'evolva-preview-error', message: String(msg), line: line, col: col, stack: err ? err.stack : '' }, '*');
+};
+window.addEventListener('unhandledrejection', function(e) {
+  window.parent.postMessage({ type: 'evolva-preview-error', message: 'Unhandled Promise: ' + (e.reason ? e.reason.message || String(e.reason) : 'unknown'), line: 0, col: 0, stack: e.reason && e.reason.stack ? e.reason.stack : '' }, '*');
+});
+"#;
+
+    let result = format!(
+        r#"<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>{base_css}</style>
+<style>{css}</style>
+<script>{safe_sandbox}</script>
+<script src="https://cdn.jsdelivr.net/npm/interactjs/dist/interact.min.js"></script>
+<script>{error_capture}</script>
+</head>
+<body style="margin:0;padding:0;overflow:hidden;height:100vh;width:100vw;position:relative;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;background:var(--bg-canvas);background-image:radial-gradient(var(--bg-dot) 1px,transparent 1px);background-size:20px 20px;color:var(--text-primary);">
+{html_body}
+<script>{safe_js}</script>
+</body></html>"#,
+        base_css = base_css,
+        css = css,
+        safe_sandbox = safe_sandbox,
+        error_capture = error_capture,
+        safe_js = safe_js,
+        html_body = html_body
+    );
+
+    Ok(result)
+}
+
+#[tauri::command]
+fn init_project(
+    projects: tauri::State<'_, Mutex<HashMap<String, ProjectFs>>>,
+    tab_id: String,
 ) -> Result<(), String> {
-    let mut map = state.lock().map_err(|e| e.to_string())?;
-    let list = map.entry(tab_id).or_insert_with(Vec::new);
-    list.push(Mutation { instruction, code });
+    let mut map = projects.lock().map_err(|e| e.to_string())?;
+    let mut fs = map.get(&tab_id).cloned().unwrap_or_default();
+
+    // 仅在项目为空时初始化默认文件
+    if fs.files.is_empty() {
+        fs.write("index.html", r#"<div id="app"></div>"#);
+        fs.write("style.css", "/* Evolva project styles — inherit base theme, override here */\n");
+        fs.write("app.js", "// Evolva project logic\n");
+    }
+
+    map.insert(tab_id, fs);
     Ok(())
 }
 
+/// 调试命令：返回项目文件内容，用于排查空白预览问题
 #[tauri::command]
-fn get_mutation_count(
-    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
+fn debug_project(
+    projects: tauri::State<'_, Mutex<HashMap<String, ProjectFs>>>,
     tab_id: String,
-) -> Result<usize, String> {
-    let map = state.lock().map_err(|e| e.to_string())?;
-    Ok(map.get(&tab_id).map(|v| v.len()).unwrap_or(0))
+) -> Result<serde_json::Value, String> {
+    let map = projects.lock().map_err(|e| e.to_string())?;
+    let fs = map.get(&tab_id).ok_or("Tab not found".to_string())?;
+    let mut files = serde_json::Map::new();
+    for (name, content) in &fs.files {
+        files.insert(name.clone(), serde_json::Value::String(content.clone()));
+    }
+    Ok(serde_json::Value::Object(files))
 }
 
 #[tauri::command]
 fn export_app(
-    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
+    projects: tauri::State<'_, Mutex<HashMap<String, ProjectFs>>>,
     path: String,
     name: String,
     tab_id: String,
     window_states: Option<serde_json::Value>,
 ) -> Result<(), String> {
-    let map = state.lock().map_err(|e| e.to_string())?;
-    let list = map.get(&tab_id).ok_or("Tab not found".to_string())?;
-    if list.is_empty() {
-        return Err("No mutations to export".to_string());
+    let map = projects.lock().map_err(|e| e.to_string())?;
+    let fs = map.get(&tab_id).ok_or("Tab not found".to_string())?;
+    if fs.files.is_empty() {
+        return Err("No project files to export".to_string());
     }
-    let active_version = list.len() - 1;
     let data = ExportData {
-        version: 1,
+        version: 2,
         name,
         created_at: chrono::Utc::now().to_rfc3339(),
-        active_version,
-        versions: list.clone(),
-        states: window_states,
+        versions: Vec::new(),
+        files: Some(fs.files.clone()),
+        active_version: None,
+        states: None,
+        window_states,
     };
     let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
@@ -459,7 +837,7 @@ fn export_app(
 
 #[tauri::command]
 fn import_app(
-    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
+    projects: tauri::State<'_, Mutex<HashMap<String, ProjectFs>>>,
     path: String,
     tab_id: String,
 ) -> Result<LoadResult, String> {
@@ -467,55 +845,70 @@ fn import_app(
     let data: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| format!("Invalid JSON: {}", e))?;
 
-    let versions_val = data.get("versions").ok_or("Missing 'versions' field")?;
-    let versions: Vec<Mutation> =
-        serde_json::from_value(versions_val.clone()).map_err(|e| format!("Invalid versions: {}", e))?;
+    let file_version = data.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
 
-    let active_version = data
-        .get("active_version")
-        .and_then(|v| v.as_u64())
-        .ok_or("Missing 'active_version' field")? as usize;
+    let (files, states, codes) = if file_version >= 2 {
+        // v2: 直接读取 files 对象
+        let files: HashMap<String, String> = data.get("files")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .ok_or("Missing or invalid 'files' field in v2 format")?;
+        let states = data.get("window_states").cloned();
+        (files, states, Vec::new())
+    } else {
+        // v1 → v2 迁移：将所有 mutation 代码合并为一个 app.js
+        let versions_val = data.get("versions").ok_or("Missing 'versions' field")?;
+        let versions: Vec<Mutation> =
+            serde_json::from_value(versions_val.clone()).map_err(|e| format!("Invalid versions: {}", e))?;
+        let active_version = data
+            .get("active_version")
+            .and_then(|v| v.as_u64())
+            .ok_or("Missing 'active_version' field")? as usize;
+        if active_version >= versions.len() {
+            return Err("Invalid active_version".to_string());
+        }
+        let codes: Vec<String> = versions[..=active_version]
+            .iter()
+            .map(|m| m.code.clone())
+            .collect();
+        let combined_js = codes.join("\n\n");
+        let mut files = HashMap::new();
+        files.insert("index.html".to_string(), "<div id=\"app\"></div>".to_string());
+        files.insert("style.css".to_string(), String::new());
+        files.insert("app.js".to_string(), combined_js);
+        let states = data.get("states").cloned();
+        (files, states, codes)
+    };
 
-    if active_version >= versions.len() {
-        return Err("Invalid active_version".to_string());
-    }
-
-    let codes: Vec<String> = versions[..=active_version]
-        .iter()
-        .map(|m| m.code.clone())
-        .collect();
-
-    let states = data.get("states").cloned();
-
-    let mut map = state.lock().map_err(|e| e.to_string())?;
-    map.insert(tab_id, versions);
+    let project_fs = ProjectFs { files };
+    let mut map = projects.lock().map_err(|e| e.to_string())?;
+    map.insert(tab_id, project_fs);
 
     Ok(LoadResult { codes, states })
 }
 
 #[tauri::command]
 fn clear_mutations(
-    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
+    projects: tauri::State<'_, Mutex<HashMap<String, ProjectFs>>>,
     tab_id: String,
 ) -> Result<(), String> {
-    let mut map = state.lock().map_err(|e| e.to_string())?;
+    let mut map = projects.lock().map_err(|e| e.to_string())?;
     map.remove(&tab_id);
     Ok(())
 }
 
 #[tauri::command]
 fn auto_save(
-    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
+    projects: tauri::State<'_, Mutex<HashMap<String, ProjectFs>>>,
     app: tauri::AppHandle,
     tab_id: String,
     tab_name: String,
     window_states: Option<serde_json::Value>,
 ) -> Result<(), String> {
-    let map = state.lock().map_err(|e| e.to_string())?;
+    let map = projects.lock().map_err(|e| e.to_string())?;
     let path = auto_save_path(&app, &tab_id)?;
 
-    let list = match map.get(&tab_id) {
-        Some(l) => l,
+    let fs = match map.get(&tab_id) {
+        Some(fs) => fs,
         None => {
             if path.exists() {
                 std::fs::remove_file(&path).map_err(|e| e.to_string())?;
@@ -524,21 +917,22 @@ fn auto_save(
         }
     };
 
-    if list.is_empty() {
+    if fs.files.is_empty() {
         if path.exists() {
             std::fs::remove_file(&path).map_err(|e| e.to_string())?;
         }
         return Ok(());
     }
 
-    let active_version = list.len() - 1;
     let data = ExportData {
-        version: 1,
+        version: 2,
         name: tab_name,
         created_at: chrono::Utc::now().to_rfc3339(),
-        active_version,
-        versions: list.clone(),
-        states: window_states,
+        versions: Vec::new(),
+        files: Some(fs.files.clone()),
+        active_version: None,
+        states: None,
+        window_states,
     };
     let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
@@ -547,7 +941,7 @@ fn auto_save(
 
 #[tauri::command]
 fn auto_load(
-    state: tauri::State<'_, Mutex<HashMap<String, Vec<Mutation>>>>,
+    projects: tauri::State<'_, Mutex<HashMap<String, ProjectFs>>>,
     app: tauri::AppHandle,
     tab_id: String,
 ) -> Result<Option<LoadResult>, String> {
@@ -560,30 +954,44 @@ fn auto_load(
     let data: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| format!("Invalid JSON: {}", e))?;
 
-    let versions_val = data.get("versions").ok_or("Missing 'versions' field")?;
-    let versions: Vec<Mutation> =
-        serde_json::from_value(versions_val.clone()).map_err(|e| format!("Invalid versions: {}", e))?;
+    let file_version = data.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
 
-    let active_version = data
-        .get("active_version")
-        .and_then(|v| v.as_u64())
-        .ok_or("Missing 'active_version' field")? as usize;
+    let (files, states) = if file_version >= 2 {
+        let files: HashMap<String, String> = data.get("files")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .ok_or("Missing 'files' in v2 format")?;
+        let states = data.get("window_states").cloned();
+        (files, states)
+    } else {
+        // v1 → v2 迁移
+        let versions_val = data.get("versions").ok_or("Missing 'versions' field")?;
+        let versions: Vec<Mutation> =
+            serde_json::from_value(versions_val.clone()).map_err(|e| format!("Invalid versions: {}", e))?;
+        let active_version = data
+            .get("active_version")
+            .and_then(|v| v.as_u64())
+            .ok_or("Missing 'active_version' field")? as usize;
+        if active_version >= versions.len() {
+            return Err("Invalid active_version".to_string());
+        }
+        let codes: Vec<String> = versions[..=active_version]
+            .iter()
+            .map(|m| m.code.clone())
+            .collect();
+        let combined_js = codes.join("\n\n");
+        let mut files = HashMap::new();
+        files.insert("index.html".to_string(), "<div id=\"app\"></div>".to_string());
+        files.insert("style.css".to_string(), String::new());
+        files.insert("app.js".to_string(), combined_js);
+        let states = data.get("states").cloned();
+        (files, states)
+    };
 
-    if active_version >= versions.len() {
-        return Err("Invalid active_version".to_string());
-    }
+    let project_fs = ProjectFs { files };
+    let mut map = projects.lock().map_err(|e| e.to_string())?;
+    map.insert(tab_id, project_fs);
 
-    let codes: Vec<String> = versions[..=active_version]
-        .iter()
-        .map(|m| m.code.clone())
-        .collect();
-
-    let states = data.get("states").cloned();
-
-    let mut map = state.lock().map_err(|e| e.to_string())?;
-    map.insert(tab_id, versions);
-
-    Ok(Some(LoadResult { codes, states }))
+    Ok(Some(LoadResult { codes: Vec::new(), states }))
 }
 
 // === Tab Save Management ===
@@ -804,14 +1212,15 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(Mutex::new(HashMap::<String, Vec<Mutation>>::new()))
+        .manage(Mutex::new(HashMap::<String, ProjectFs>::new()))
+        .manage(Mutex::new(HashMap::<String, Vec<rig::completion::message::Message>>::new()))
         .invoke_handler(tauri::generate_handler![
             load_settings,
             save_settings,
             call_llm,
-            estimate_tokens,
-            save_mutation,
-            get_mutation_count,
+            build_preview,
+            init_project,
+            debug_project,
             export_app,
             import_app,
             clear_mutations,

@@ -170,6 +170,8 @@ function TabState(id, name) {
   this.sendSpinner = null;
   this.contextFill = null;
   this.contextText = null;
+  this.errorRetryCount = 0;
+  this.errorRetryTimer = null;
 }
 
 function getActiveState() {
@@ -202,7 +204,10 @@ async function createTab(name) {
 
   tabs[id] = state;
 
-  // 初始化 iframe 内容
+  // 初始化项目文件系统
+  await invoke('init_project', { tabId: id });
+
+  // 初始化 iframe 内容（从项目文件构建预览）
   await initMutationSpaceForTab(state);
 
   // 同步主题
@@ -504,33 +509,11 @@ function createCoreElement(state) {
 // === Mutation Space Init ===
 
 async function initMutationSpaceForTab(state) {
-  // 缓存 CSS 文本，避免重复请求
-  if (!cachedCssText) {
-    cachedCssText = await fetch('style.css').then(function(r) { return r.text(); });
-  }
-  // 预加载 sandbox.js 和 interact.js
-  if (!cachedSandboxText) {
-    cachedSandboxText = await fetch('sandbox.js').then(function(r) { return r.text(); });
-  }
-  if (!cachedInteractText) {
-    cachedInteractText = await fetch('https://cdn.jsdelivr.net/npm/interactjs/dist/interact.min.js')
-      .then(function(r) { return r.text(); });
-  }
-
-  // 安全处理：防止 </script 截断 HTML 解析
-  function safeScript(text) {
-    return text.replace(/<\/script/gi, '<\\/script');
-  }
-
+  // 通过 build_preview 获取组装好的 HTML
+  var previewHtml = await invoke('build_preview', { tabId: state.id });
   var doc = state.iframe.contentDocument;
   doc.open();
-  doc.write('<!DOCTYPE html><html><head><meta charset="UTF-8">' +
-    '<style>' + cachedCssText + '</style>' +
-    '<script>' + safeScript(cachedSandboxText) + '<\/script>' +
-    '<script>' + safeScript(cachedInteractText) + '<\/script>' +
-    '</head>' +
-    '<body style="margin:0;padding:0;overflow:hidden;height:100vh;width:100vw;position:relative;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;' +
-    'background:var(--bg-canvas);background-image:radial-gradient(var(--bg-dot) 1px,transparent 1px);background-size:20px 20px;color:var(--text-primary);"></body></html>');
+  doc.write(previewHtml);
   doc.close();
 
   // 设置 mutation helpers
@@ -1171,8 +1154,9 @@ function applyWindowStates(state, states) {
 
 async function exportApp(state) {
   try {
-    var count = await invoke('get_mutation_count', { tabId: state.id });
-    if (count === 0) { log(state, 'error', t('logNoMutations')); return; }
+    var debugInfo = await invoke('debug_project', { tabId: state.id });
+    var fileCount = Object.keys(debugInfo).length;
+    if (fileCount === 0) { log(state, 'error', t('logNoMutations')); return; }
 
     var filePath = await tauriDialog.save({
       defaultPath: 'app.evolva.json',
@@ -1183,7 +1167,7 @@ async function exportApp(state) {
     var name = filePath.split(/[\/]/).pop().replace('.evolva.json', '').replace('.json', '');
     var windowStates = captureWindowStates(state);
     await invoke('export_app', { path: filePath, name: name, tabId: state.id, windowStates: windowStates });
-    log(state, 'system', t('logExported', { count: count }));
+    log(state, 'system', t('logExported', { count: fileCount }));
   } catch (err) {
     log(state, 'error', t('logExportFailed') + String(err));
   }
@@ -1191,9 +1175,10 @@ async function exportApp(state) {
 
 async function importApp(state) {
   try {
-    var count = await invoke('get_mutation_count', { tabId: state.id });
-    if (count > 0) {
-      var confirmed = await showConfirmDialog(count);
+    var debugInfo = await invoke('debug_project', { tabId: state.id });
+    var fileCount = Object.keys(debugInfo).length;
+    if (fileCount > 0) {
+      var confirmed = await showConfirmDialog(fileCount);
       if (!confirmed) return;
     }
 
@@ -1203,24 +1188,16 @@ async function importApp(state) {
     });
     if (!selected) return;
 
-    var result = await invoke('import_app', { path: selected, tabId: state.id });
+    await invoke('import_app', { path: selected, tabId: state.id });
 
-    var iframeDoc = state.iframe.contentDocument;
-    while (iframeDoc.body.firstChild) iframeDoc.body.removeChild(iframeDoc.body.firstChild);
-    var headStyles = iframeDoc.head.querySelectorAll('style');
-    headStyles.forEach(function(style, i) { if (i > 0) style.remove(); });
+    // 通过 build_preview 重建预览
+    var previewHtml = await invoke('build_preview', { tabId: state.id });
+    loadPreviewHtml(state, previewHtml);
 
-    setupMutationHelpers(state);
-
-    for (var i = 0; i < result.codes.length; i++) {
-      injectCode(state, result.codes[i]);
-    }
-    // 恢复窗口状态
-    applyWindowStates(state, result.states);
     var windowStates = captureWindowStates(state);
     await invoke('auto_save', { tabId: state.id, tabName: state.name, windowStates: windowStates });
     updateContext(state);
-    log(state, 'system', t('logImported', { count: result.codes.length }));
+    log(state, 'system', t('logImported', { count: fileCount }));
   } catch (err) {
     log(state, 'error', t('logImportFailed') + String(err));
   }
@@ -1253,13 +1230,16 @@ async function updateContext(state) {
   if (!state || !state.mutationSpaceReady) return;
   try {
     var dom = state.iframe.contentDocument.documentElement.outerHTML;
-    var est = await invoke('estimate_tokens', { dom: dom });
-    state.contextFill.style.width = est.percentage + '%';
-    var maxK = Math.round(est.max_tokens / 1000);
-    state.contextText.textContent = 'context ' + est.tokens + ' / ' + maxK + 'k (' + est.percentage.toFixed(1) + '%)';
+    // 前端估算：约 4 字符 = 1 token
+    var tokens = Math.round(dom.length / 4);
+    var maxTokens = 128000;
+    var percentage = Math.min((tokens / maxTokens) * 100, 100);
+    state.contextFill.style.width = percentage + '%';
+    var maxK = Math.round(maxTokens / 1000);
+    state.contextText.textContent = 'context ' + tokens + ' / ' + maxK + 'k (' + percentage.toFixed(1) + '%)';
     state.contextFill.classList.remove('warning', 'danger');
-    if (est.percentage > 96) state.contextFill.classList.add('danger');
-    else if (est.percentage > 72) state.contextFill.classList.add('warning');
+    if (percentage > 96) state.contextFill.classList.add('danger');
+    else if (percentage > 72) state.contextFill.classList.add('warning');
   } catch (_) {}
 }
 
@@ -1351,7 +1331,6 @@ function handleSandboxInvoke(source, id, payload) {
   // 白名单过滤：只允许安全的命令（无需额外权限开关，白名单本身就是安全边界）
   var allowedCommands = {
     'get_app_info': true,
-    'estimate_tokens': true,
     'open_url': true,
     'sandbox_read_file': true,
     'sandbox_write_file': true,
@@ -1448,6 +1427,76 @@ window.addEventListener('message', function(event) {
   invoke('open_url', { url: event.data.url });
 });
 
+// 监听 iframe 预览错误 — 自动回传 LLM 修复（最多 2 次）
+var MAX_ERROR_RETRIES = 2;
+var ERROR_RETRY_WINDOW = 3000; // mutation 完成后 3 秒内的错误才触发自动修复
+
+window.addEventListener('message', function(event) {
+  if (!event.data || event.data.type !== 'evolva-preview-error') return;
+  var st = getActiveState();
+  if (!st) return;
+
+  var msg = event.data.message || 'Unknown error';
+  var line = event.data.line ? ' (line ' + event.data.line + ')' : '';
+  var stack = event.data.stack || '';
+
+  log(st, 'error', 'Preview error: ' + msg + line);
+  if (stack) console.log('[Preview Error Stack]', stack);
+
+  // 正在处理用户指令或自动修复中，不干扰
+  if (st.processing) return;
+  // 不在重试窗口内
+  if (!st.errorRetryTimer) return;
+  if (st.errorRetryCount >= MAX_ERROR_RETRIES) {
+    log(st, 'system', 'Auto-fix retry limit reached (' + MAX_ERROR_RETRIES + '). Please fix manually.');
+    return;
+  }
+
+  st.errorRetryCount++;
+  log(st, 'system', 'Auto-fix attempt ' + st.errorRetryCount + '/' + MAX_ERROR_RETRIES + '...');
+
+  var fixInstruction = 'Fix this runtime error in the preview:\n' +
+    'Error: ' + msg + line + '\n' +
+    (stack ? 'Stack:\n' + stack.split('\n').slice(0, 5).join('\n') : '') + '\n\n' +
+    'Check the relevant file (likely app.js) and fix the bug. Do NOT change the overall design.';
+
+  autoFixError(st, fixInstruction);
+});
+
+async function autoFixError(state, instruction) {
+  clearTimeout(state.errorRetryTimer);
+  state.processing = true;
+
+  try {
+    var result = await invoke('call_llm', {
+      req: { instruction: instruction, tabId: state.id },
+    });
+
+    if (result.tool_calls && result.tool_calls.length > 0) {
+      for (var i = 0; i < result.tool_calls.length; i++) {
+        var tc = result.tool_calls[i];
+        log(state, 'system', '🔧 ' + tc.tool + '(' + (tc.args.length > 80 ? tc.args.substring(0, 80) + '...' : tc.args) + ')');
+      }
+    }
+
+    var previewHtml = await invoke('build_preview', { tabId: state.id });
+    loadPreviewHtml(state, previewHtml);
+
+    var winStates = captureWindowStates(state);
+    await invoke('auto_save', { tabId: state.id, tabName: state.name, windowStates: winStates });
+    updateContext(state);
+
+    // 重开错误监听窗口（允许链式修复）
+    state.errorRetryTimer = setTimeout(function() {
+      state.errorRetryTimer = null;
+    }, ERROR_RETRY_WINDOW);
+  } catch (err) {
+    log(state, 'error', 'Auto-fix failed: ' + String(err));
+  } finally {
+    state.processing = false;
+  }
+}
+
 // parent 端 postMessage 监听
 window.addEventListener('message', function (event) {
   var data = event.data;
@@ -1471,28 +1520,38 @@ window.addEventListener('message', function (event) {
   }
 });
 
-// === Script Injection ===
-function injectCode(state, code) {
-  // 文本替换：仅替换 import() 和 require()，它们无法在运行时拦截
-  // fetch() 由 sandbox.js 透明代理，无需替换
-  var safeCode = code
-    .replace(/(?<!\.)\bimport\s*\(/g, 'evolva.import(')
-    .replace(/(?<!\.)\brequire\s*\(/g, 'evolva.import(');
-
-  var iframeDoc = state.iframe.contentDocument;
-  var script = iframeDoc.createElement('script');
-  script.textContent = '(async () => {\n' + safeCode + '\n})();';
-  iframeDoc.body.appendChild(script);
-  script.remove();
-
-  // 代码注入后，确保所有窗口都有控制按钮
+// === Preview Loading ===
+function loadPreviewHtml(state, html) {
+  console.log('[loadPreviewHtml] html length=' + html.length + ', first 200:', html.substring(0, 200));
+  var doc = state.iframe.contentDocument;
+  doc.open();
+  doc.write(html);
+  doc.close();
+  // 设置 mutation helpers
+  setupMutationHelpers(state);
+  state.mutationSpaceReady = true;
+  // 全页替换后，主动为已存在的窗口注入控制按钮和拖拽
   var iframeWin = state.iframe.contentWindow;
-  if (iframeWin && iframeWin.injectWindowControls) {
-    var windows = iframeDoc.querySelectorAll('.evolva-window');
-    for (var i = 0; i < windows.length; i++) {
-      iframeWin.injectWindowControls(windows[i]);
+  if (iframeWin && iframeWin.setupDraggable) {
+    var existingWins = doc.querySelectorAll('.evolva-window');
+    for (var i = 0; i < existingWins.length; i++) {
+      iframeWin.setupDraggable(existingWins[i]);
     }
   }
+  // 同步主题
+  if (document.body.classList.contains('light')) {
+    doc.documentElement.classList.add('light');
+    doc.body.classList.add('light');
+  }
+  // 调试：检查 iframe body 内容
+  setTimeout(function() {
+    var bodyHtml = doc.body ? doc.body.innerHTML : 'NO BODY';
+    console.log('[loadPreviewHtml] body content length=' + bodyHtml.length);
+    if (bodyHtml.length < 10) {
+      log(state, 'error', 'Preview body is empty! Check browser console for JS errors.');
+      console.log('[loadPreviewHtml] Full HTML:', html);
+    }
+  }, 100);
 }
 
 // === Mutation Loop ===
@@ -1512,41 +1571,50 @@ async function mutate(state) {
   try {
     log(state, 'user', userMsg);
 
-    var dom = state.iframe.contentDocument.documentElement.outerHTML;
-    log(state, 'system', t('logDomCaptured', { tokens: Math.round(dom.length / 4), chars: dom.length }));
-
+    // 调用新的 agent 架构：发送指令 + tab_id
     var result = await invoke('call_llm', {
-      req: { dom: dom, instruction: userMsg },
+      req: { instruction: userMsg, tabId: state.id },
     });
 
+    // 显示工具调用日志
+    if (result.tool_calls && result.tool_calls.length > 0) {
+      for (var i = 0; i < result.tool_calls.length; i++) {
+        var tc = result.tool_calls[i];
+        log(state, 'system', '🔧 ' + tc.tool + '(' + (tc.args.length > 80 ? tc.args.substring(0, 80) + '...' : tc.args) + ')');
+      }
+    }
+
     log(state, 'system', t('logLlmResponded', {
-      chars: result.raw.length,
-      code: result.code ? result.code.length + ' chars' : 'none'
+      chars: result.text.length,
+      code: result.tool_calls ? result.tool_calls.length + ' tool calls' : 'none'
     }));
 
-    if (!result.code) {
-      log(state, 'error', t('logNoCode'));
-      console.log('LLM raw response:', result.raw);
-      return;
-    }
+    // 重新构建预览并加载到 iframe
+    var previewHtml = await invoke('build_preview', { tabId: state.id });
+    loadPreviewHtml(state, previewHtml);
 
-    try {
-      injectCode(state, result.code);
-      log(state, 'system', t('logInjected'));
-    } catch (injectErr) {
-      log(state, 'error', t('logInjectionFailed') + String(injectErr));
-      console.log('Failed code:', result.code);
-      return;
-    }
+    log(state, 'system', t('logMutationApplied'));
 
-    await invoke('save_mutation', { tabId: state.id, instruction: userMsg, code: result.code });
+    // 开启运行时错误自动修复窗口（3 秒内的错误会触发自动修复）
+    state.errorRetryCount = 0;
+    clearTimeout(state.errorRetryTimer);
+    state.errorRetryTimer = setTimeout(function() {
+      state.errorRetryTimer = null;
+    }, ERROR_RETRY_WINDOW);
     var winStates = captureWindowStates(state);
     await invoke('auto_save', { tabId: state.id, tabName: state.name, windowStates: winStates });
-    log(state, 'system', t('logMutationApplied'));
     state.promptEl.style.height = 'auto';
     updateContext(state);
   } catch (err) {
     log(state, 'error', String(err));
+    // 调试：输出项目文件状态
+    try {
+      var debugInfo = await invoke('debug_project', { tabId: state.id });
+      console.log('[Debug] Project files:', JSON.stringify(debugInfo).substring(0, 500));
+      log(state, 'system', 'Debug: files=' + Object.keys(debugInfo).join(', '));
+    } catch (debugErr) {
+      console.log('[Debug] Failed to get project info:', debugErr);
+    }
   } finally {
     state.processing = false;
     state.sendBtn.classList.remove('loading');
@@ -1649,14 +1717,14 @@ document.getElementById('tab-about').addEventListener('click', showAboutDialog);
           switchTab(st.id);
           try {
             var result = await invoke('auto_load', { tabId: saved.tab_id });
-            if (result && result.codes && result.codes.length > 0) {
-              for (var j = 0; j < result.codes.length; j++) {
-                injectCode(st, result.codes[j]);
-              }
+            if (result) {
+              // 通过 build_preview 重建预览
+              var previewHtml = await invoke('build_preview', { tabId: saved.tab_id });
+              loadPreviewHtml(st, previewHtml);
               applyWindowStates(st, result.states);
               updateContext(st);
             }
-            log(st, 'system', t('logAutoLoaded', { count: result && result.codes ? result.codes.length : 0 }));
+            log(st, 'system', t('logAutoLoaded', { count: result ? 1 : 0 }));
           } catch (err) {
             log(st, 'error', t('logImportFailed') + String(err));
           }

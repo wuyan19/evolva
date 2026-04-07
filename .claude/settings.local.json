@@ -10,7 +10,10 @@
       "Bash(openspec instructions:*)",
       "Bash(openspec list:*)",
       "Bash(cargo check:*)",
-      "Bash(cargo tauri:*)"
+      "Bash(cargo tauri:*)",
+      "Bash(cargo add:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)"
     ]
   }
 }
